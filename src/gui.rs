@@ -391,16 +391,23 @@ impl ConfigGUI {
         description_label.set_opacity(0.8);
 
         let open_install_button = Button::with_label("Open Installation Guide");
+        let open_update_button = Button::with_label("Open Update Guide");
         let open_tutorial_button = Button::with_label("Open Master Tutorial");
         let open_setup_button = Button::with_label("Open Preconfigured Setups");
 
         let install_url = "https://wiki.hypr.land/Getting-Started/Installation/";
+        let update_url = "https://wiki.hypr.land/FAQ/";
         let tutorial_url = "https://wiki.hypr.land/Getting-Started/Master-Tutorial/";
         let setups_url = "https://wiki.hypr.land/Getting-Started/Preconfigured-setups/";
 
         let parent = self.window.clone();
         open_install_button.connect_clicked(move |_| {
             open_uri(&parent, install_url);
+        });
+
+        let parent = self.window.clone();
+        open_update_button.connect_clicked(move |_| {
+            open_uri(&parent, update_url);
         });
 
         let parent = self.window.clone();
@@ -415,11 +422,12 @@ impl ConfigGUI {
 
         let button_row = Box::new(Orientation::Horizontal, 10);
         button_row.append(&open_install_button);
+        button_row.append(&open_update_button);
         button_row.append(&open_tutorial_button);
         button_row.append(&open_setup_button);
 
         let checklist_label = Label::new(Some(
-            "Recommended path: read the installation page first, then follow the master tutorial after Hyprland is installed.",
+            "Recommended path: install or update Hyprland first, then follow the master tutorial after Hyprland is installed.",
         ));
         checklist_label.set_wrap(true);
         checklist_label.set_halign(gtk::Align::Start);
