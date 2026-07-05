@@ -1,56 +1,94 @@
-<div align='center'>
+<div align="center">
 
-<h2>HyprGUI <img src='https://raw.githubusercontent.com/hyprutils/.github/refs/heads/main/hyprutils_transparent.png'width='18' height='18'></h2>
+<h1>Better Hyprland GUI</h1>
 
-An unofficial GUI for configuring Hyprland, built with GTK4 and Rust. 🚀🦀<br>
-Comes with a custom [hyprparser](https://github.com/nnyyxxxx/hyprparser) for Hyprland's configuration file. (Rust btw) 🦀
+<p>A GTK4 and Rust helper for configuring Hyprland, onboarding dotfiles, and guiding Linux setup.</p>
 
 ![Preview](.github/preview.png)
 
 </div>
 
-## Installation
+## What it does
 
-### GitHub Releases
-See HyprGUI's [releases page](https://github.com/doingsomethingwithai-commits/better-hyprland-gui/releases) for downloadable binaries.
+- Edit Hyprland configuration through a desktop UI.
+- Open a dedicated page for installing dotfiles from GitHub repository links.
+- Open a dedicated page for Hyprland installation guidance on Linux.
+- Keep the setup flow in one place instead of bouncing between docs and terminals.
 
-### Arch Linux
-There are 2 different [AUR](https://aur.archlinux.org) packages available:
+## Quick Install
 
-- [hyprgui](https://aur.archlinux.org/packages/hyprgui) - Latest release built from source
-- [hyprgui-bin](https://aur.archlinux.org/packages/hyprgui-bin) - Latest release in binary form
+The recommended path is a distro-aware bootstrap script.
 
-Install the preferred package with:
+### One-liner
+
 ```bash
-git clone https://aur.archlinux.org/<package>.git
-cd <package>
-makepkg -si
+curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
 ```
 
-Or, if you're using an [AUR Helper](https://wiki.archlinux.org/title/AUR_helpers), it's even simpler (using [paru](https://github.com/Morganamilo/paru) as an example):
+### Optional Hyprland install
+
+If you want the bootstrap script to also try installing Hyprland on a supported distro:
+
 ```bash
-paru -S <package>
+INSTALL_HYPRLAND=1 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
 ```
 
-## Building from source
-1. Install Rust (preferably `rustup`) through your distro's package or [the official script](https://www.rust-lang.org/tools/install)
-2. Install `git`, `pango` and `gtk4`
+### Notes
+
+- Hyprland is officially tested on Arch Linux and NixOS.
+- Other Linux distributions may work, but support and package availability can vary.
+- The GUI itself is the place for configuration and dotfiles. The bootstrap script only prepares the system and starts the app.
+
+## Manual build
+
+1. Install Rust with `rustup` or your distro package manager.
+2. Install `git`, `gtk4`, and `pango` development packages.
 3. Clone this repository:
-`git clone https://github.com/doingsomethingwithai-commits/better-hyprland-gui && cd better-hyprland-gui`
-4. Compile the app with `cargo build --release` or run it directly with `cargo run --release`
 
-## TODO:
+```bash
+git clone https://github.com/doingsomethingwithai-commits/better-hyprland-gui
+cd better-hyprland-gui
+```
+
+4. Build and run:
+
+```bash
+cargo build --release
+cargo run --release
+```
+
+## Suggested workflow
+
+1. Install Hyprland using the distro-specific guidance in the GUI.
+2. Open the dotfiles page and paste a GitHub repository URL.
+3. Clone or open the repo, then follow its README or install script.
+4. Return to the main config pages and tune Hyprland settings.
+
+## Why this layout
+
+This repository is intentionally split into two layers:
+
+- A GUI for configuration and setup assistance.
+- A bootstrap script for system preparation and app startup.
+
+That keeps the project honest: the GUI can guide installation across multiple distros, while the installer can stay distro-aware instead of pretending every Linux system exposes the same package names.
+
+## TODO
+
 - [x] Implement GUI
 - [x] Implement parser
-- [x] Improve the readme
+- [x] Add setup pages for dotfiles and Hyprland
+- [x] Improve the README
 - [ ] Improve parser
 - [ ] Improve GUI
+- [ ] Add more distro-specific installer helpers
 
-## Credits:
-- [Nyx](https://github.com/nnyyxxxx) - Implementing the parser, rest of the GUI, and maintaining the project
-- [Adam](https://github.com/adamperkowski) - Implementing the base GUI, maintaining the AUR packages and the project alongside Nyx
-- [Vaxry](https://github.com/vaxerski) - Hyprland
-- [rust-gtk](https://github.com/gtk-rs/gtk4-rs) - The GTK4 library
-- [Hyprland](https://github.com/hyprwm/Hyprland) - The window manager
+## Credits
 
-<h6 align='center'>Copyright (C) 2024 HyprUtils<h6>
+- Nyx - parser and core GUI work
+- Adam Perkowski - base GUI and AUR support
+- Vaxry - Hyprland
+- gtk-rs - GTK4 bindings
+- Hyprland - the window manager
+
+<h6 align="center">Copyright (C) 2024 HyprUtils</h6>
