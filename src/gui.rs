@@ -1,7 +1,7 @@
 use gtk::{
-    gdk, glib, prelude::*, Application, ApplicationWindow, Box, Button, ColorButton, DropDown,
-    Entry, Frame, HeaderBar, Image, Label, MessageDialog, Orientation, Popover, ScrolledWindow,
-    SpinButton, Stack, StackSidebar, StringList, Switch, Widget,
+    gdk, gio, glib, prelude::*, Application, ApplicationWindow, Box, Button, ColorButton,
+    DropDown, Entry, Frame, HeaderBar, Image, Label, MessageDialog, Orientation, Popover,
+    ScrolledWindow, SpinButton, Stack, StackSidebar, StringList, Switch, Widget,
 };
 
 use hyprparser::HyprlandConfig;
@@ -64,6 +64,58 @@ fn add_dropdown_option(
     container.append(&hbox);
 
     options.insert(name.to_string(), dropdown.upcast());
+}
+
+fn show_message_dialog(
+    parent: &ApplicationWindow,
+    message_type: gtk::MessageType,
+    title: &str,
+    text: &str,
+) {
+    let dialog = MessageDialog::builder()
+        .transient_for(parent)
+        .message_type(message_type)
+        .buttons(gtk::ButtonsType::Ok)
+        .title(title)
+        .text(text)
+        .modal(true)
+        .build();
+
+    dialog.connect_response(|dialog, _| {
+        dialog.close();
+    });
+
+    dialog.show();
+}
+
+fn open_uri(parent: &ApplicationWindow, uri: &str) {
+    let trimmed = uri.trim();
+
+    if trimmed.is_empty() {
+        show_message_dialog(
+            parent,
+            gtk::MessageType::Warning,
+            "Missing Link",
+            "Please paste a GitHub link first.",
+        );
+        return;
+    }
+
+    if let Err(err) = gio::AppInfo::launch_default_for_uri(trimmed, None::<&gio::AppLaunchContext>)
+    {
+        show_message_dialog(
+            parent,
+            gtk::MessageType::Error,
+            "Could Not Open Link",
+            &format!("Failed to open the link: {}", err),
+        );
+    }
+}
+
+fn copy_text_to_clipboard(text: &str) {
+    if let Some(display) = gdk::Display::default() {
+        display.clipboard().set_text(text);
+    }
 }
 
 pub struct ConfigGUI {
@@ -171,6 +223,226 @@ impl ConfigGUI {
             save_config_button,
             gear_menu,
         }
+    }
+
+    fn rebuild_navigation(&mut self) {
+        while let Some(child) = self.stack.first_child() {
+            self.stack.remove(&child);
+        }
+
+        while let Some(child) = self.content_box.first_child() {
+            self.content_box.remove(&child);
+        }
+
+        self.sidebar = StackSidebar::new();
+        self.sidebar.set_stack(&self.stack);
+        self.sidebar.set_width_request(200);
+
+        self.content_box.append(&self.sidebar);
+        self.content_box.append(&self.stack);
+
+        self.stack.connect_visible_child_notify(move |stack| {
+            if let Some(child) = stack.visible_child() {
+                if let Some(scrolled_window) = child.downcast_ref::<ScrolledWindow>() {
+                    let adj = scrolled_window.vadjustment();
+                    adj.set_value(adj.lower());
+                }
+            }
+        });
+    }
+
+    fn add_setup_overview_page(&mut self, note: &str) {
+        let scrolled_window = ScrolledWindow::new();
+        scrolled_window.set_vexpand(true);
+        scrolled_window.set_hexpand(true);
+
+        let container = Box::new(Orientation::Vertical, 14);
+        container.set_margin_top(16);
+        container.set_margin_bottom(16);
+        container.set_margin_start(16);
+        container.set_margin_end(16);
+
+        let title_label = Label::new(Some("Setup Center"));
+        title_label.set_markup("<b>Setup Center</b>");
+        title_label.set_halign(gtk::Align::Start);
+
+        let note_label = Label::new(Some(note));
+        note_label.set_wrap(true);
+        note_label.set_halign(gtk::Align::Start);
+
+        let help_label = Label::new(Some(
+            "Use the pages in the sidebar to install Hyprland or prepare dotfiles from GitHub links.",
+        ));
+        help_label.set_wrap(true);
+        help_label.set_opacity(0.8);
+        help_label.set_halign(gtk::Align::Start);
+
+        container.append(&title_label);
+        container.append(&note_label);
+        container.append(&help_label);
+
+        scrolled_window.set_child(Some(&container));
+        self.stack
+            .add_titled(&scrolled_window, Some("setup"), "Setup");
+    }
+
+    fn add_dotfiles_page(&mut self) {
+        let scrolled_window = ScrolledWindow::new();
+        scrolled_window.set_vexpand(true);
+        scrolled_window.set_hexpand(true);
+
+        let container = Box::new(Orientation::Vertical, 14);
+        container.set_margin_top(16);
+        container.set_margin_bottom(16);
+        container.set_margin_start(16);
+        container.set_margin_end(16);
+
+        let title_label = Label::new(Some("Dotfiles from GitHub"));
+        title_label.set_markup("<b>Dotfiles from GitHub</b>");
+        title_label.set_halign(gtk::Align::Start);
+
+        let description_label = Label::new(Some(
+            "Paste a GitHub repository link for your dotfiles, then open the repo or copy a starter clone command.",
+        ));
+        description_label.set_wrap(true);
+        description_label.set_halign(gtk::Align::Start);
+        description_label.set_opacity(0.8);
+
+        let entry = Entry::new();
+        entry.set_placeholder_text(Some("https://github.com/username/dotfiles"));
+
+        let button_row = Box::new(Orientation::Horizontal, 10);
+        let open_button = Button::with_label("Open GitHub Link");
+        let copy_button = Button::with_label("Copy git clone Command");
+
+        let parent = self.window.clone();
+        let entry_for_open = entry.clone();
+        open_button.connect_clicked(move |_| {
+            let url = entry_for_open.text().to_string();
+            open_uri(&parent, &url);
+        });
+
+        let parent = self.window.clone();
+        let entry_for_copy = entry.clone();
+        copy_button.connect_clicked(move |_| {
+            let url = entry_for_copy.text().trim().to_string();
+
+            if url.is_empty() {
+                show_message_dialog(
+                    &parent,
+                    gtk::MessageType::Warning,
+                    "Missing Link",
+                    "Please paste a GitHub link first.",
+                );
+                return;
+            }
+
+            let command = format!("git clone {} ~/dotfiles", url);
+            copy_text_to_clipboard(&command);
+            show_message_dialog(
+                &parent,
+                gtk::MessageType::Info,
+                "Copied",
+                "The clone command has been copied to the clipboard.",
+            );
+        });
+
+        button_row.append(&open_button);
+        button_row.append(&copy_button);
+
+        let hint_label = Label::new(Some(
+            "Tip: if the repository includes an install script, follow the project README after cloning.",
+        ));
+        hint_label.set_wrap(true);
+        hint_label.set_halign(gtk::Align::Start);
+        hint_label.set_opacity(0.75);
+
+        container.append(&title_label);
+        container.append(&description_label);
+        container.append(&entry);
+        container.append(&button_row);
+        container.append(&hint_label);
+
+        scrolled_window.set_child(Some(&container));
+        self.stack
+            .add_titled(&scrolled_window, Some("dotfiles"), "Dotfiles");
+    }
+
+    fn add_hyprland_install_page(&mut self) {
+        let scrolled_window = ScrolledWindow::new();
+        scrolled_window.set_vexpand(true);
+        scrolled_window.set_hexpand(true);
+
+        let container = Box::new(Orientation::Vertical, 14);
+        container.set_margin_top(16);
+        container.set_margin_bottom(16);
+        container.set_margin_start(16);
+        container.set_margin_end(16);
+
+        let title_label = Label::new(Some("Hyprland Installation"));
+        title_label.set_markup("<b>Hyprland Installation</b>");
+        title_label.set_halign(gtk::Align::Start);
+
+        let description_label = Label::new(Some(
+            "Hyprland is officially tested on Arch and NixOS. Other Linux distributions may work too, but support can vary.",
+        ));
+        description_label.set_wrap(true);
+        description_label.set_halign(gtk::Align::Start);
+        description_label.set_opacity(0.8);
+
+        let open_install_button = Button::with_label("Open Installation Guide");
+        let open_tutorial_button = Button::with_label("Open Master Tutorial");
+        let open_setup_button = Button::with_label("Open Preconfigured Setups");
+
+        let install_url = "https://wiki.hypr.land/Getting-Started/Installation/";
+        let tutorial_url = "https://wiki.hypr.land/Getting-Started/Master-Tutorial/";
+        let setups_url = "https://wiki.hypr.land/Getting-Started/Preconfigured-setups/";
+
+        let parent = self.window.clone();
+        open_install_button.connect_clicked(move |_| {
+            open_uri(&parent, install_url);
+        });
+
+        let parent = self.window.clone();
+        open_tutorial_button.connect_clicked(move |_| {
+            open_uri(&parent, tutorial_url);
+        });
+
+        let parent = self.window.clone();
+        open_setup_button.connect_clicked(move |_| {
+            open_uri(&parent, setups_url);
+        });
+
+        let button_row = Box::new(Orientation::Horizontal, 10);
+        button_row.append(&open_install_button);
+        button_row.append(&open_tutorial_button);
+        button_row.append(&open_setup_button);
+
+        let checklist_label = Label::new(Some(
+            "Recommended path: read the installation page first, then follow the master tutorial after Hyprland is installed.",
+        ));
+        checklist_label.set_wrap(true);
+        checklist_label.set_halign(gtk::Align::Start);
+        checklist_label.set_opacity(0.75);
+
+        container.append(&title_label);
+        container.append(&description_label);
+        container.append(&button_row);
+        container.append(&checklist_label);
+
+        scrolled_window.set_child(Some(&container));
+        self.stack
+            .add_titled(&scrolled_window, Some("hyprland-install"), "Hyprland Install");
+    }
+
+    pub fn load_landing_pages(&mut self, note: &str) {
+        self.config_widgets.clear();
+        self.changed_options.borrow_mut().clear();
+
+        self.rebuild_navigation();
+        self.add_setup_overview_page(note);
+        self.add_dotfiles_page();
+        self.add_hyprland_install_page();
     }
 
     pub fn setup_config_buttons(gui: Rc<RefCell<ConfigGUI>>) {
@@ -385,29 +657,10 @@ impl ConfigGUI {
         self.config_widgets.clear();
         self.content_box.set_visible(true);
 
-        while let Some(child) = self.stack.first_child() {
-            self.stack.remove(&child);
-        }
-
-        while let Some(child) = self.content_box.first_child() {
-            self.content_box.remove(&child);
-        }
-
-        self.sidebar = StackSidebar::new();
-        self.sidebar.set_stack(&self.stack);
-        self.sidebar.set_width_request(200);
-
-        self.content_box.append(&self.sidebar);
-        self.content_box.append(&self.stack);
-
-        self.stack.connect_visible_child_notify(move |stack| {
-            if let Some(child) = stack.visible_child() {
-                if let Some(scrolled_window) = child.downcast_ref::<ScrolledWindow>() {
-                    let adj = scrolled_window.vadjustment();
-                    adj.set_value(adj.lower());
-                }
-            }
-        });
+        self.rebuild_navigation();
+        self.add_setup_overview_page("Your Hyprland config file is ready to edit.");
+        self.add_dotfiles_page();
+        self.add_hyprland_install_page();
 
         let categories = [
             ("General", "general"),

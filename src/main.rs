@@ -21,7 +21,11 @@ fn build_ui(app: &Application) {
     let config_path_full = get_config_path();
 
     if !config_path_full.exists() {
-        gui.borrow_mut().custom_error_popup_critical(
+        gui.borrow_mut().load_landing_pages(&format!(
+            "Hyprland config not found at ~/{}. Use the install pages below to get started.",
+            CONFIG_PATH
+        ));
+        gui.borrow_mut().custom_error_popup(
             "File not found",
             &format!("File not found: ~/{}", CONFIG_PATH),
             true,

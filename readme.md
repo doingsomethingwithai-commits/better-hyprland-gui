@@ -12,7 +12,7 @@ Comes with a custom [hyprparser](https://github.com/nnyyxxxx/hyprparser) for Hyp
 ## Installation
 
 ### GitHub Releases
-See HyprGUI's [releases page](https://github.com/nnyyxxxx/hyprgui/releases) for downloadable binaries.
+See HyprGUI's [releases page](https://github.com/doingsomethingwithai-commits/better-hyprland-gui/releases) for downloadable binaries.
 
 ### Arch Linux
 There are 2 different [AUR](https://aur.archlinux.org) packages available:
@@ -36,7 +36,7 @@ paru -S <package>
 1. Install Rust (preferably `rustup`) through your distro's package or [the official script](https://www.rust-lang.org/tools/install)
 2. Install `git`, `pango` and `gtk4`
 3. Clone this repository:
-`git clone https://github.com/nnyyxxxx/hyprgui && cd hyprgui`
+`git clone https://github.com/doingsomethingwithai-commits/better-hyprland-gui && cd better-hyprland-gui`
 4. Compile the app with `cargo build --release` or run it directly with `cargo run --release`
 
 ## TODO:
