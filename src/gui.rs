@@ -5,9 +5,11 @@ use gtk::{
 };
 
 use hyprparser::HyprlandConfig;
+use std::env;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -118,6 +120,192 @@ fn copy_text_to_clipboard(text: &str) {
     }
 }
 
+fn spotlight_state_path() -> PathBuf {
+    Path::new(&env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+        .join(".config")
+        .join("hyprgui")
+        .join("spotlight_seen")
+}
+
+pub fn should_show_spotlight_guide() -> bool {
+    !spotlight_state_path().exists()
+}
+
+fn mark_spotlight_guide_seen() {
+    let path = spotlight_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, "seen");
+}
+
+#[derive(Clone)]
+struct SpotlightStep {
+    title: &'static str,
+    target: &'static str,
+    body: &'static str,
+    tip: &'static str,
+}
+
+fn spotlight_steps() -> Vec<SpotlightStep> {
+    vec![
+        SpotlightStep {
+            title: "Welcome",
+            target: "Main navigation",
+            body: "This guide gives you a quick tour of the most important controls. You can skip it now and reopen it later from the gear menu.",
+            tip: "Use Next to move through the tour.",
+        },
+        SpotlightStep {
+            title: "Save",
+            target: "Save button",
+            body: "The Save button writes the current Hyprland configuration changes back to your config file.",
+            tip: "Use this after editing values in the configuration pages.",
+        },
+        SpotlightStep {
+            title: "Settings",
+            target: "Gear menu",
+            body: "The gear menu contains config import/export actions and the Spotlight Guide entry.",
+            tip: "Use it when you want to reload a GUI profile or reopen this guide.",
+        },
+        SpotlightStep {
+            title: "Dotfiles",
+            target: "Dotfiles page",
+            body: "Paste a GitHub link for your dotfiles, open it directly, or copy a clone command to start the setup flow.",
+            tip: "This is the easiest way to bootstrap a config repository.",
+        },
+        SpotlightStep {
+            title: "Install",
+            target: "Hyprland install page",
+            body: "Use the install page for Hyprland installation help, the update guide, and links to the official setup docs.",
+            tip: "This is the best place to start on a fresh system.",
+        },
+    ]
+}
+
+fn open_spotlight_guide(parent: &ApplicationWindow) {
+    let steps = spotlight_steps();
+    let current_index = Rc::new(RefCell::new(0usize));
+
+    let guide_window = ApplicationWindow::builder()
+        .transient_for(parent)
+        .modal(true)
+        .title("Spotlight Guide")
+        .default_width(760)
+        .default_height(420)
+        .build();
+
+    let root = Box::new(Orientation::Vertical, 16);
+    root.set_margin_top(18);
+    root.set_margin_bottom(18);
+    root.set_margin_start(18);
+    root.set_margin_end(18);
+
+    let title_label = Label::new(None);
+    title_label.set_markup("<b>Spotlight Guide</b>");
+    title_label.set_halign(gtk::Align::Start);
+
+    let step_label = Label::new(None);
+    step_label.set_halign(gtk::Align::Start);
+    step_label.set_wrap(true);
+
+    let target_frame = Frame::new(None);
+    let target_label = Label::new(None);
+    target_label.set_margin_top(18);
+    target_label.set_margin_bottom(18);
+    target_label.set_margin_start(18);
+    target_label.set_margin_end(18);
+    target_label.set_wrap(true);
+    target_label.set_halign(gtk::Align::Start);
+    target_frame.set_child(Some(&target_label));
+
+    let body_label = Label::new(None);
+    body_label.set_wrap(true);
+    body_label.set_halign(gtk::Align::Start);
+
+    let tip_label = Label::new(None);
+    tip_label.set_wrap(true);
+    tip_label.set_halign(gtk::Align::Start);
+    tip_label.set_opacity(0.75);
+
+    let button_row = Box::new(Orientation::Horizontal, 10);
+    let back_button = Button::with_label("Back");
+    let next_button = Button::with_label("Next");
+    let skip_button = Button::with_label("Skip Guide");
+    let finish_button = Button::with_label("Finish");
+
+    button_row.append(&back_button);
+    button_row.append(&next_button);
+    button_row.append(&skip_button);
+    button_row.append(&finish_button);
+
+    root.append(&title_label);
+    root.append(&step_label);
+    root.append(&target_frame);
+    root.append(&body_label);
+    root.append(&tip_label);
+    root.append(&button_row);
+
+    guide_window.set_child(Some(&root));
+
+    let window_for_skip = guide_window.clone();
+    skip_button.connect_clicked(move |_| {
+        mark_spotlight_guide_seen();
+        window_for_skip.close();
+    });
+
+    let window_for_finish = guide_window.clone();
+    finish_button.connect_clicked(move |_| {
+        mark_spotlight_guide_seen();
+        window_for_finish.close();
+    });
+
+    let step_label_back = step_label.clone();
+    let target_label_back = target_label.clone();
+    let body_label_back = body_label.clone();
+    let tip_label_back = tip_label.clone();
+    let next_button_back = next_button.clone();
+    let back_button_back = back_button.clone();
+    let current_index_back = current_index.clone();
+    let update_step = Rc::new(move || {
+        let index = *current_index_back.borrow();
+        let step = &steps[index];
+        step_label_back.set_markup(&format!("<span size=\"large\"><b>{}</b></span>", step.title));
+        target_label_back.set_markup(&format!("<b>Spotlight:</b> {}", step.target));
+        body_label_back.set_text(step.body);
+        tip_label_back.set_text(step.tip);
+        back_button_back.set_sensitive(index > 0);
+        next_button_back.set_sensitive(index + 1 < steps.len());
+        next_button_back.set_label(if index + 1 < steps.len() { "Next" } else { "Done" });
+    });
+
+    let update_step_back = update_step.clone();
+    let current_index_prev = current_index.clone();
+    back_button.connect_clicked(move |_| {
+        let mut index = current_index_prev.borrow_mut();
+        if *index > 0 {
+            *index -= 1;
+        }
+        update_step_back();
+    });
+
+    let update_step_next = update_step.clone();
+    let current_index_next = current_index.clone();
+    let window_for_next = guide_window.clone();
+    next_button.connect_clicked(move |_| {
+        let mut index = current_index_next.borrow_mut();
+        if *index + 1 < steps.len() {
+            *index += 1;
+            update_step_next();
+        } else {
+            mark_spotlight_guide_seen();
+            window_for_next.close();
+        }
+    });
+
+    update_step();
+    guide_window.present();
+}
+
 pub struct ConfigGUI {
     pub window: ApplicationWindow,
     config_widgets: HashMap<String, ConfigWidget>,
@@ -158,9 +346,11 @@ impl ConfigGUI {
 
         let save_config_button = Button::with_label("Save HyprGUI Config");
         let load_config_button = Button::with_label("Load HyprGUI Config");
+        let spotlight_guide_button = Button::with_label("Spotlight Guide");
 
         gear_menu_box.append(&load_config_button);
         gear_menu_box.append(&save_config_button);
+        gear_menu_box.append(&spotlight_guide_button);
 
         gear_menu.borrow().set_child(Some(&gear_menu_box));
 
@@ -189,6 +379,11 @@ impl ConfigGUI {
         tooltip_button.connect_clicked(move |button| {
             popover.set_parent(button);
             popover.popup();
+        });
+
+        let parent = window.clone();
+        spotlight_guide_button.connect_clicked(move |_| {
+            open_spotlight_guide(&parent);
         });
 
         let save_button = Button::with_label("Save");
@@ -223,6 +418,10 @@ impl ConfigGUI {
             save_config_button,
             gear_menu,
         }
+    }
+
+    pub fn show_spotlight_guide(&self) {
+        open_spotlight_guide(&self.window);
     }
 
     fn rebuild_navigation(&mut self) {

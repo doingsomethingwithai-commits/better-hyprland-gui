@@ -85,6 +85,10 @@ along with this program; if not, see
         }
     }
 
+    if gui::should_show_spotlight_guide() {
+        gui.borrow().show_spotlight_guide();
+    }
+
     gui.borrow().window.present();
 }
 
