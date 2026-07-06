@@ -30,7 +30,7 @@ install_rustup_if_missing() {
 }
 
 install_arch_deps() {
-  sudo pacman -Sy --needed --noconfirm git curl rustup gtk4 pango pkgconf
+  sudo pacman -Sy --needed --noconfirm git curl base-devel gtk4 pango pkgconf
 }
 
 install_debian_deps() {
@@ -80,7 +80,7 @@ main() {
   source_os_release
 
   case "${ID:-unknown}" in
-    arch|manjaro|endeavouros)
+    arch|manjaro|endeavouros|athena|athenaos)
       install_arch_deps
       install_rustup_if_missing
       if [[ "$INSTALL_HYPRLAND" == "1" ]]; then

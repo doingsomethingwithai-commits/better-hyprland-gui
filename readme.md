@@ -36,6 +36,7 @@ INSTALL_HYPRLAND=1 curl -fsSL https://raw.githubusercontent.com/doingsomethingwi
 ### Notes
 
 - Hyprland is officially tested on Arch Linux and NixOS.
+- Athena OS is handled as an Arch-like path in the bootstrap script.
 - Other Linux distributions may work, but support and package availability can vary.
 - The GUI itself is the place for configuration and dotfiles. The bootstrap script only prepares the system and starts the app.
 
