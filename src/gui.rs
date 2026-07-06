@@ -142,23 +142,251 @@ fn show_install_result(parent: &ApplicationWindow, title: &str, success: bool, o
     show_message_dialog(parent, message_type, title, output);
 }
 
-fn install_hyprland_from_gui(parent: &ApplicationWindow) {
-    let distro = distro_id();
-    let result = match distro.as_str() {
-        "arch" | "manjaro" | "endeavouros" | "athena" | "athenaos" => {
-            Command::new("pkexec")
-                .args(["pacman", "-Sy", "--needed", "--noconfirm", "hyprland"])
-                .output()
+fn find_repo_root(start: PathBuf) -> Option<PathBuf> {
+    let mut current = Some(start.as_path());
+    while let Some(path) = current {
+        if path.join(".git").exists() {
+            return Some(path.to_path_buf());
         }
-        "fedora" => Command::new("pkexec")
-            .args(["dnf", "install", "-y", "hyprland"])
-            .output(),
-        "opensuse" | "opensuse-tumbleweed" | "suse" => Command::new("pkexec")
-            .args(["zypper", "--non-interactive", "install", "hyprland"])
-            .output(),
-        "nixos" => Command::new("nix")
-            .args(["profile", "install", "nixpkgs#hyprland"])
-            .output(),
+        current = path.parent();
+    }
+    None
+}
+
+fn software_repo_dir() -> Option<PathBuf> {
+    let mut candidates = vec![std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf()))];
+
+    if let Some(app_dir) = env::var_os("APP_DIR") {
+        candidates.push(Some(PathBuf::from(app_dir)));
+    }
+
+    if let Some(repo_dir) = env::var_os("HYPRGUI_REPO_DIR") {
+        candidates.push(Some(PathBuf::from(repo_dir)));
+    }
+
+    for candidate in candidates.into_iter().flatten() {
+        if let Some(repo_root) = find_repo_root(candidate) {
+            return Some(repo_root);
+        }
+    }
+
+    None
+}
+
+fn entry_text_or_none(entry: &Entry) -> Option<String> {
+    let text = entry.text().trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn checkout_repo_ref(repo_dir: &Path, version_ref: &str) -> Result<(), String> {
+    let candidates = [
+        version_ref.to_string(),
+        format!("origin/{version_ref}"),
+        format!("refs/tags/{version_ref}"),
+    ];
+
+    let mut last_error = String::new();
+
+    for candidate in candidates {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["checkout", "--force", &candidate])
+            .output()
+            .map_err(|err| format!("Failed to start git checkout for {candidate}: {err}"))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        last_error = String::from_utf8_lossy(&output.stderr).to_string();
+    }
+
+    Err(format!(
+        "Unable to checkout version ref '{version_ref}'. Last git error:\n\n{last_error}"
+    ))
+}
+
+fn nix_flake_ref_for_hyprland(version_ref: Option<&str>) -> String {
+    match version_ref.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if value.contains('#') => value.to_string(),
+        Some(value) => format!("{value}#hyprland"),
+        None => "nixpkgs#hyprland".to_string(),
+    }
+}
+
+fn run_hyprland_command(
+    parent: &ApplicationWindow,
+    mut command: Command,
+    success_title: &str,
+    success_message: &str,
+    failure_title: &str,
+) {
+    match command.output() {
+        Ok(output) if output.status.success() => {
+            show_install_result(parent, success_title, true, success_message);
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            show_install_result(
+                parent,
+                failure_title,
+                false,
+                &format!("The command failed.\n\n{}", stderr),
+            );
+        }
+        Err(err) => {
+            show_install_result(
+                parent,
+                failure_title,
+                false,
+                &format!("Failed to start the command: {}", err),
+            );
+        }
+    }
+}
+
+fn rebuild_software_from_repo(parent: &ApplicationWindow, repo_dir: &Path) {
+    let mut cargo_command = Command::new("cargo");
+    cargo_command.current_dir(repo_dir).args(["build", "--release"]);
+
+    match cargo_command.output() {
+        Ok(output) if output.status.success() => {
+            show_install_result(
+                parent,
+                "Software Updated",
+                true,
+                "The GUI repository was updated and rebuilt successfully. Restart the application to use the latest version.",
+            );
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            show_install_result(
+                parent,
+                "Software Update Failed",
+                false,
+                &format!("The rebuild command failed.\n\n{}", stderr),
+            );
+        }
+        Err(err) => {
+            show_install_result(
+                parent,
+                "Software Update Failed",
+                false,
+                &format!("Failed to start the rebuild command: {}", err),
+            );
+        }
+    }
+}
+
+fn update_software_from_github(parent: &ApplicationWindow, version_ref: Option<&str>) {
+    let Some(repo_dir) = software_repo_dir() else {
+        show_message_dialog(
+            parent,
+            gtk::MessageType::Warning,
+            "Repository Not Found",
+            "I could not find the local Git checkout for this GUI. Please open the app from the cloned repository or set APP_DIR/HYPRGUI_REPO_DIR.",
+        );
+        return;
+    };
+
+    let pinned_ref = version_ref.map(str::trim).filter(|value| !value.is_empty());
+
+    if let Some(version_ref) = pinned_ref {
+        let mut fetch_command = Command::new("git");
+        fetch_command.arg("-C").arg(&repo_dir).args(["fetch", "--tags", "origin"]);
+
+        match fetch_command.output() {
+            Ok(output) if output.status.success() => {
+                match checkout_repo_ref(&repo_dir, version_ref) {
+                    Ok(()) => {
+                        rebuild_software_from_repo(parent, &repo_dir);
+                    }
+                    Err(err) => {
+                        show_install_result(
+                            parent,
+                            "Software Update Failed",
+                            false,
+                            &err,
+                        );
+                    }
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                show_install_result(
+                    parent,
+                    "Software Update Failed",
+                    false,
+                    &format!("The git fetch command failed.\n\n{}", stderr),
+                );
+            }
+            Err(err) => {
+                show_install_result(
+                    parent,
+                    "Software Update Failed",
+                    false,
+                    &format!("Failed to start the git fetch command: {}", err),
+                );
+            }
+        }
+        return;
+    }
+
+    let mut git_command = Command::new("git");
+    git_command.arg("-C").arg(&repo_dir).args(["pull", "--rebase"]);
+
+    match git_command.output() {
+        Ok(output) if output.status.success() => {
+            rebuild_software_from_repo(parent, &repo_dir);
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            show_install_result(
+                parent,
+                "Software Update Failed",
+                false,
+                &format!("The Git update command failed.\n\n{}", stderr),
+            );
+        }
+        Err(err) => {
+            show_install_result(
+                parent,
+                "Software Update Failed",
+                false,
+                &format!("Failed to start the Git update command: {}", err),
+            );
+        }
+    }
+}
+
+fn install_hyprland_from_gui(parent: &ApplicationWindow, version_ref: Option<&str>) {
+    let distro = distro_id();
+    let command = match distro.as_str() {
+        "arch" | "manjaro" | "endeavouros" | "athena" | "athenaos" => {
+            let mut command = Command::new("pkexec");
+            command.args(["pacman", "-Sy", "--needed", "--noconfirm", "hyprland"]);
+            command
+        }
+        "fedora" => {
+            let mut command = Command::new("pkexec");
+            command.args(["dnf", "install", "-y", "hyprland"]);
+            command
+        }
+        "opensuse" | "opensuse-tumbleweed" | "suse" => {
+            let mut command = Command::new("pkexec");
+            command.args(["zypper", "--non-interactive", "install", "hyprland"]);
+            command
+        }
+        "nixos" => {
+            let mut command = Command::new("nix");
+            command.arg("profile").arg("install").arg(nix_flake_ref_for_hyprland(version_ref));
+            command
+        }
         _ => {
             show_message_dialog(
                 parent,
@@ -170,33 +398,63 @@ fn install_hyprland_from_gui(parent: &ApplicationWindow) {
         }
     };
 
-    match result {
-        Ok(output) if output.status.success() => {
-            show_install_result(
-                parent,
-                "Hyprland Installed",
-                true,
-                "Hyprland installation finished successfully. Log out and select the Hyprland session if needed.",
-            );
+    run_hyprland_command(
+        parent,
+        command,
+        "Hyprland Installed",
+        "Hyprland installation finished successfully. Log out and select the Hyprland session if needed.",
+        "Hyprland Install Failed",
+    );
+}
+
+fn update_hyprland_from_gui(parent: &ApplicationWindow, version_ref: Option<&str>) {
+    let distro = distro_id();
+    let command = match distro.as_str() {
+        "arch" | "manjaro" | "endeavouros" | "athena" | "athenaos" => {
+            let mut command = Command::new("pkexec");
+            command.args(["pacman", "-Syu", "--needed", "--noconfirm", "hyprland"]);
+            command
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            show_install_result(
-                parent,
-                "Hyprland Install Failed",
-                false,
-                &format!("The install command failed.\n\n{}", stderr),
-            );
+        "fedora" => {
+            let mut command = Command::new("pkexec");
+            command.args(["dnf", "upgrade", "-y", "hyprland"]);
+            command
         }
-        Err(err) => {
-            show_install_result(
-                parent,
-                "Hyprland Install Failed",
-                false,
-                &format!("Failed to start the installer: {}", err),
-            );
+        "opensuse" | "opensuse-tumbleweed" | "suse" => {
+            let mut command = Command::new("pkexec");
+            command.args(["zypper", "--non-interactive", "update", "hyprland"]);
+            command
         }
-    }
+        "nixos" => {
+            let mut command = Command::new("nix");
+            if version_ref.is_some() {
+                command
+                    .arg("profile")
+                    .arg("install")
+                    .arg(nix_flake_ref_for_hyprland(version_ref));
+            } else {
+                command.args(["profile", "upgrade", "--regex", ".*hyprland.*"]);
+            }
+            command
+        }
+        _ => {
+            show_message_dialog(
+                parent,
+                gtk::MessageType::Warning,
+                "Unsupported Distro",
+                "This GUI can only auto-update Hyprland on supported package-manager paths. Use the update guide for manual steps.",
+            );
+            return;
+        }
+    };
+
+    run_hyprland_command(
+        parent,
+        command,
+        "Hyprland Updated",
+        "Hyprland update finished successfully. Restart or log out if the new version requires it.",
+        "Hyprland Update Failed",
+    );
 }
 
 fn spotlight_state_path() -> PathBuf {
@@ -262,7 +520,7 @@ fn spotlight_steps() -> Vec<SpotlightStep> {
 }
 
 fn open_spotlight_guide(parent: &ApplicationWindow) {
-    let steps = spotlight_steps();
+    let steps = Rc::new(spotlight_steps());
     let current_index = Rc::new(RefCell::new(0usize));
 
     let guide_window = ApplicationWindow::builder()
@@ -345,16 +603,17 @@ fn open_spotlight_guide(parent: &ApplicationWindow) {
     let next_button_back = next_button.clone();
     let back_button_back = back_button.clone();
     let current_index_back = current_index.clone();
+    let steps_back = steps.clone();
     let update_step = Rc::new(move || {
         let index = *current_index_back.borrow();
-        let step = &steps[index];
+        let step = &steps_back[index];
         step_label_back.set_markup(&format!("<span size=\"large\"><b>{}</b></span>", step.title));
         target_label_back.set_markup(&format!("<b>Spotlight:</b> {}", step.target));
         body_label_back.set_text(step.body);
         tip_label_back.set_text(step.tip);
         back_button_back.set_sensitive(index > 0);
-        next_button_back.set_sensitive(index + 1 < steps.len());
-        next_button_back.set_label(if index + 1 < steps.len() { "Next" } else { "Done" });
+        next_button_back.set_sensitive(index + 1 < steps_back.len());
+        next_button_back.set_label(if index + 1 < steps_back.len() { "Next" } else { "Done" });
     });
 
     let update_step_back = update_step.clone();
@@ -369,10 +628,11 @@ fn open_spotlight_guide(parent: &ApplicationWindow) {
 
     let update_step_next = update_step.clone();
     let current_index_next = current_index.clone();
+    let steps_next = steps.clone();
     let window_for_next = guide_window.clone();
     next_button.connect_clicked(move |_| {
         let mut index = current_index_next.borrow_mut();
-        if *index + 1 < steps.len() {
+        if *index + 1 < steps_next.len() {
             *index += 1;
             update_step_next();
         } else {
@@ -662,13 +922,31 @@ impl ConfigGUI {
         title_label.set_halign(gtk::Align::Start);
 
         let description_label = Label::new(Some(
-            "Hyprland is officially tested on Arch and NixOS. Other Linux distributions may work too, but support can vary.",
+            "Use the buttons below to install or update Hyprland. The GUI detects your Linux distribution and runs the matching package-manager command automatically.",
         ));
         description_label.set_wrap(true);
         description_label.set_halign(gtk::Align::Start);
         description_label.set_opacity(0.8);
 
+        let hyprland_version_label = Label::new(Some("Hyprland version / ref"));
+        hyprland_version_label.set_halign(gtk::Align::Start);
+        hyprland_version_label.set_opacity(0.85);
+
+        let hyprland_version_entry = Entry::new();
+        hyprland_version_entry.set_placeholder_text(Some(
+            "Optional: nixpkgs/release-20.09 or github:NixOS/nixpkgs/<ref> (NixOS only)",
+        ));
+
+        let software_version_label = Label::new(Some("Software version / ref"));
+        software_version_label.set_halign(gtk::Align::Start);
+        software_version_label.set_opacity(0.85);
+
+        let software_version_entry = Entry::new();
+        software_version_entry.set_placeholder_text(Some("Optional: branch, tag, or commit SHA"));
+
         let install_hyprland_button = Button::with_label("Install Hyprland");
+        let update_hyprland_button = Button::with_label("Update Hyprland");
+        let update_software_button = Button::with_label("Update Software");
         let open_install_button = Button::with_label("Open Installation Guide");
         let open_update_button = Button::with_label("Open Update Guide");
         let open_tutorial_button = Button::with_label("Open Master Tutorial");
@@ -680,8 +958,24 @@ impl ConfigGUI {
         let setups_url = "https://wiki.hypr.land/Getting-Started/Preconfigured-setups/";
 
         let parent = self.window.clone();
+        let hyprland_version_for_install = hyprland_version_entry.clone();
         install_hyprland_button.connect_clicked(move |_| {
-            install_hyprland_from_gui(&parent);
+            let version_ref = entry_text_or_none(&hyprland_version_for_install);
+            install_hyprland_from_gui(&parent, version_ref.as_deref());
+        });
+
+        let parent = self.window.clone();
+        let hyprland_version_for_update = hyprland_version_entry.clone();
+        update_hyprland_button.connect_clicked(move |_| {
+            let version_ref = entry_text_or_none(&hyprland_version_for_update);
+            update_hyprland_from_gui(&parent, version_ref.as_deref());
+        });
+
+        let parent = self.window.clone();
+        let software_version_for_update = software_version_entry.clone();
+        update_software_button.connect_clicked(move |_| {
+            let version_ref = entry_text_or_none(&software_version_for_update);
+            update_software_from_github(&parent, version_ref.as_deref());
         });
 
         let parent = self.window.clone();
@@ -706,13 +1000,15 @@ impl ConfigGUI {
 
         let button_row = Box::new(Orientation::Horizontal, 10);
         button_row.append(&install_hyprland_button);
+        button_row.append(&update_hyprland_button);
+        button_row.append(&update_software_button);
         button_row.append(&open_install_button);
         button_row.append(&open_update_button);
         button_row.append(&open_tutorial_button);
         button_row.append(&open_setup_button);
 
         let checklist_label = Label::new(Some(
-            "Recommended path: install or update Hyprland from this page, then follow the master tutorial after Hyprland is installed.",
+            "Recommended path: use the install, Hyprland update, or software update buttons on this page, then follow the master tutorial after Hyprland is installed.",
         ));
         checklist_label.set_wrap(true);
         checklist_label.set_halign(gtk::Align::Start);
@@ -720,6 +1016,10 @@ impl ConfigGUI {
 
         container.append(&title_label);
         container.append(&description_label);
+        container.append(&hyprland_version_label);
+        container.append(&hyprland_version_entry);
+        container.append(&software_version_label);
+        container.append(&software_version_entry);
         container.append(&button_row);
         container.append(&checklist_label);
 
@@ -881,7 +1181,12 @@ impl ConfigGUI {
         } else if let Some(color_button) = widget.downcast_ref::<ColorButton>() {
             let dummy_config = HyprlandConfig::new();
             if let Some((red, green, blue, alpha)) = dummy_config.parse_color(value) {
-                color_button.set_rgba(&gdk::RGBA::new(red, green, blue, alpha));
+                color_button.set_rgba(&gdk::RGBA::new(
+                    red as f32,
+                    green as f32,
+                    blue as f32,
+                    alpha as f32,
+                ));
             }
         } else if let Some(dropdown) = widget.downcast_ref::<DropDown>() {
             let model = dropdown.model().unwrap();
@@ -3335,7 +3640,12 @@ impl ConfigWidget {
                 });
             } else if let Some(color_button) = widget.downcast_ref::<ColorButton>() {
                 if let Some((red, green, blue, alpha)) = config.parse_color(&value) {
-                    color_button.set_rgba(&gdk::RGBA::new(red, green, blue, alpha));
+                    color_button.set_rgba(&gdk::RGBA::new(
+                        red as f32,
+                        green as f32,
+                        blue as f32,
+                        alpha as f32,
+                    ));
                 }
                 let category = category.to_string();
                 let name = name.to_string();

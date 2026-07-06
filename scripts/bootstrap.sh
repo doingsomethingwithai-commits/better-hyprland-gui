@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/doingsomethingwithai-commits/better-hyprland-gui.git"
 APP_DIR="${APP_DIR:-$HOME/.local/share/better-hyprland-gui}"
+APP_REF="${APP_REF:-}"
 
 log() {
   printf '%s\n' "$*"
@@ -10,6 +11,20 @@ log() {
 
 have() {
   command -v "$1" >/dev/null 2>&1
+}
+
+checkout_version_ref() {
+  local ref="$1"
+  local candidate
+  local candidates=("$ref" "origin/$ref" "refs/tags/$ref")
+
+  for candidate in "${candidates[@]}"; do
+    if git -C "$APP_DIR" checkout --force "$candidate" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+
+  git -C "$APP_DIR" checkout --force "$ref"
 }
 
 source_os_release() {
@@ -52,10 +67,19 @@ install_nix_deps() {
 clone_or_update_repo() {
   if [[ -d "$APP_DIR/.git" ]]; then
     log "Updating existing checkout in $APP_DIR"
-    git -C "$APP_DIR" pull --rebase
+    if [[ -n "$APP_REF" ]]; then
+      git -C "$APP_DIR" fetch --tags origin
+      checkout_version_ref "$APP_REF"
+    else
+      git -C "$APP_DIR" pull --rebase
+    fi
   else
     log "Cloning repository into $APP_DIR"
     git clone "$REPO_URL" "$APP_DIR"
+    if [[ -n "$APP_REF" ]]; then
+      git -C "$APP_DIR" fetch --tags origin
+      checkout_version_ref "$APP_REF"
+    fi
   fi
 }
 
@@ -108,6 +132,11 @@ main() {
   log ""
   log "If you want to stay on the installed checkout:"
   log "  cd \"$APP_DIR\""
+  if [[ -n "$APP_REF" ]]; then
+    log ""
+    log "Pinned ref used:"
+    log "  $APP_REF"
+  fi
 }
 
 main "$@"
