@@ -9,6 +9,19 @@ log() {
   printf '%s\n' "$*"
 }
 
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+install_rustup_if_missing() {
+  if ! have cargo; then
+    log "Rust toolchain not found, installing rustup."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    # shellcheck disable=SC1090
+    source "$HOME/.cargo/env"
+  fi
+}
+
 checkout_version_ref() {
   local ref="$1"
   local candidate
@@ -29,8 +42,12 @@ if [[ -d "$APP_DIR/.git" ]]; then
     git -C "$APP_DIR" fetch --tags origin
     checkout_version_ref "$APP_REF"
   else
-    git -C "$APP_DIR" fetch origin main
-    git -C "$APP_DIR" reset --hard origin/main
+    git -C "$APP_DIR" fetch --prune --tags origin
+    if git -C "$APP_DIR" show-ref --verify --quiet refs/remotes/origin/main; then
+      git -C "$APP_DIR" reset --hard origin/main
+    else
+      git -C "$APP_DIR" reset --hard HEAD
+    fi
   fi
 else
   log "Checkout not found, cloning into $APP_DIR"
@@ -41,7 +58,9 @@ else
   fi
 fi
 
-if command -v cargo >/dev/null 2>&1; then
+install_rustup_if_missing
+
+if have cargo; then
   log "Rebuilding software"
   (
     cd "$APP_DIR"

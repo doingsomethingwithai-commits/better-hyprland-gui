@@ -19,15 +19,5 @@ case "$APP_DIR" in
     ;;
 esac
 
-log "This will permanently delete:"
-log "  $APP_DIR"
-log "Type DELETE to continue."
-read -r confirmation
-
-if [[ "$confirmation" != "DELETE" ]]; then
-  log "Aborted."
-  exit 1
-fi
-
 rm -rf -- "$APP_DIR"
 log "Deleted $APP_DIR"
