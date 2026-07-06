@@ -12,33 +12,33 @@
 
 - Edit Hyprland configuration through a desktop UI.
 - Open a dedicated page for installing dotfiles from GitHub repository links.
-- Open a dedicated page for Hyprland installation guidance on Linux.
-- Keep the setup flow in one place instead of bouncing between docs and terminals.
+- Open a dedicated page for Hyprland installation and update guidance on Linux.
+- Install Hyprland directly from the GUI, not from a separate one-liner installer.
 
 ## Quick Install
 
-The recommended path is a distro-aware bootstrap script.
-
-### One-liner
+Use this to install the GUI and its local dependencies:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
 ```
 
-### Optional Hyprland install
+## Hyprland install
 
-If you want the bootstrap script to also try installing Hyprland on a supported distro:
+Hyprland itself is installed from inside the app:
 
-```bash
-INSTALL_HYPRLAND=1 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
-```
+- Open the GUI.
+- Go to the Hyprland install page.
+- Click `Install Hyprland`.
 
-### Notes
+That keeps the install flow inside the GUI and avoids a separate Hyprland one-liner.
+
+## Notes
 
 - Hyprland is officially tested on Arch Linux and NixOS.
 - Athena OS is handled as an Arch-like path in the bootstrap script.
 - Other Linux distributions may work, but support and package availability can vary.
-- The GUI itself is the place for configuration and dotfiles. The bootstrap script only prepares the system and starts the app.
+- The bootstrap script only prepares the system and starts the app.
 
 ## Manual build
 
@@ -60,9 +60,9 @@ cargo run --release
 
 ## Suggested workflow
 
-1. Install Hyprland using the distro-specific guidance in the GUI.
-2. Open the dotfiles page and paste a GitHub repository URL.
-3. Clone or open the repo, then follow its README or install script.
+1. Install the GUI.
+2. Open the Hyprland install page and click the install button.
+3. Open the dotfiles page and paste a GitHub repository URL.
 4. Return to the main config pages and tune Hyprland settings.
 
 ## Why this layout
@@ -72,7 +72,7 @@ This repository is intentionally split into two layers:
 - A GUI for configuration and setup assistance.
 - A bootstrap script for system preparation and app startup.
 
-That keeps the project honest: the GUI can guide installation across multiple distros, while the installer can stay distro-aware instead of pretending every Linux system exposes the same package names.
+The Hyprland package install now lives in the GUI so there is only one visible install path for Hyprland itself.
 
 ## TODO
 
@@ -80,6 +80,7 @@ That keeps the project honest: the GUI can guide installation across multiple di
 - [x] Implement parser
 - [x] Add setup pages for dotfiles and Hyprland
 - [x] Improve the README
+- [x] Move Hyprland install into the GUI
 - [ ] Improve parser
 - [ ] Improve GUI
 - [ ] Add more distro-specific installer helpers

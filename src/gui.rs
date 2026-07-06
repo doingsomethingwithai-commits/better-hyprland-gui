@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::rc::Rc;
 
 fn add_dropdown_option(
@@ -117,6 +118,84 @@ fn open_uri(parent: &ApplicationWindow, uri: &str) {
 fn copy_text_to_clipboard(text: &str) {
     if let Some(display) = gdk::Display::default() {
         display.clipboard().set_text(text);
+    }
+}
+
+fn distro_id() -> String {
+    if let Ok(content) = fs::read_to_string("/etc/os-release") {
+        for line in content.lines() {
+            if let Some(value) = line.strip_prefix("ID=") {
+                return value.trim_matches('"').to_lowercase();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+fn show_install_result(parent: &ApplicationWindow, title: &str, success: bool, output: &str) {
+    let message_type = if success {
+        gtk::MessageType::Info
+    } else {
+        gtk::MessageType::Error
+    };
+
+    show_message_dialog(parent, message_type, title, output);
+}
+
+fn install_hyprland_from_gui(parent: &ApplicationWindow) {
+    let distro = distro_id();
+    let result = match distro.as_str() {
+        "arch" | "manjaro" | "endeavouros" | "athena" | "athenaos" => {
+            Command::new("pkexec")
+                .args(["pacman", "-Sy", "--needed", "--noconfirm", "hyprland"])
+                .output()
+        }
+        "fedora" => Command::new("pkexec")
+            .args(["dnf", "install", "-y", "hyprland"])
+            .output(),
+        "opensuse" | "opensuse-tumbleweed" | "suse" => Command::new("pkexec")
+            .args(["zypper", "--non-interactive", "install", "hyprland"])
+            .output(),
+        "nixos" => Command::new("nix")
+            .args(["profile", "install", "nixpkgs#hyprland"])
+            .output(),
+        _ => {
+            show_message_dialog(
+                parent,
+                gtk::MessageType::Warning,
+                "Unsupported Distro",
+                "This GUI can only auto-install Hyprland on supported package-manager paths. Use the install guide for manual steps.",
+            );
+            return;
+        }
+    };
+
+    match result {
+        Ok(output) if output.status.success() => {
+            show_install_result(
+                parent,
+                "Hyprland Installed",
+                true,
+                "Hyprland installation finished successfully. Log out and select the Hyprland session if needed.",
+            );
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            show_install_result(
+                parent,
+                "Hyprland Install Failed",
+                false,
+                &format!("The install command failed.\n\n{}", stderr),
+            );
+        }
+        Err(err) => {
+            show_install_result(
+                parent,
+                "Hyprland Install Failed",
+                false,
+                &format!("Failed to start the installer: {}", err),
+            );
+        }
     }
 }
 
@@ -589,6 +668,7 @@ impl ConfigGUI {
         description_label.set_halign(gtk::Align::Start);
         description_label.set_opacity(0.8);
 
+        let install_hyprland_button = Button::with_label("Install Hyprland");
         let open_install_button = Button::with_label("Open Installation Guide");
         let open_update_button = Button::with_label("Open Update Guide");
         let open_tutorial_button = Button::with_label("Open Master Tutorial");
@@ -598,6 +678,11 @@ impl ConfigGUI {
         let update_url = "https://wiki.hypr.land/FAQ/";
         let tutorial_url = "https://wiki.hypr.land/Getting-Started/Master-Tutorial/";
         let setups_url = "https://wiki.hypr.land/Getting-Started/Preconfigured-setups/";
+
+        let parent = self.window.clone();
+        install_hyprland_button.connect_clicked(move |_| {
+            install_hyprland_from_gui(&parent);
+        });
 
         let parent = self.window.clone();
         open_install_button.connect_clicked(move |_| {
@@ -620,13 +705,14 @@ impl ConfigGUI {
         });
 
         let button_row = Box::new(Orientation::Horizontal, 10);
+        button_row.append(&install_hyprland_button);
         button_row.append(&open_install_button);
         button_row.append(&open_update_button);
         button_row.append(&open_tutorial_button);
         button_row.append(&open_setup_button);
 
         let checklist_label = Label::new(Some(
-            "Recommended path: install or update Hyprland first, then follow the master tutorial after Hyprland is installed.",
+            "Recommended path: install or update Hyprland from this page, then follow the master tutorial after Hyprland is installed.",
         ));
         checklist_label.set_wrap(true);
         checklist_label.set_halign(gtk::Align::Start);

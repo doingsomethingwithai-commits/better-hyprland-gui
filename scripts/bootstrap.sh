@@ -3,7 +3,6 @@ set -euo pipefail
 
 REPO_URL="https://github.com/doingsomethingwithai-commits/better-hyprland-gui.git"
 APP_DIR="${APP_DIR:-$HOME/.local/share/better-hyprland-gui}"
-INSTALL_HYPRLAND="${INSTALL_HYPRLAND:-0}"
 
 log() {
   printf '%s\n' "$*"
@@ -50,14 +49,6 @@ install_nix_deps() {
   nix profile install nixpkgs#git nixpkgs#curl nixpkgs#rustup nixpkgs#gtk4 nixpkgs#pango nixpkgs#pkg-config
 }
 
-install_hyprland_arch() {
-  sudo pacman -S --needed --noconfirm hyprland
-}
-
-install_hyprland_nix() {
-  nix profile install nixpkgs#hyprland
-}
-
 clone_or_update_repo() {
   if [[ -d "$APP_DIR/.git" ]]; then
     log "Updating existing checkout in $APP_DIR"
@@ -83,37 +74,22 @@ main() {
     arch|manjaro|endeavouros|athena|athenaos)
       install_arch_deps
       install_rustup_if_missing
-      if [[ "$INSTALL_HYPRLAND" == "1" ]]; then
-        install_hyprland_arch
-      fi
       ;;
     fedora)
       install_fedora_deps
       install_rustup_if_missing
-      if [[ "$INSTALL_HYPRLAND" == "1" ]]; then
-        log "Hyprland package names vary on Fedora setups. Open the GUI after install for the distro guidance page."
-      fi
       ;;
     opensuse*|suse)
       install_opensuse_deps
       install_rustup_if_missing
-      if [[ "$INSTALL_HYPRLAND" == "1" ]]; then
-        log "Hyprland package names vary on openSUSE setups. Open the GUI after install for the distro guidance page."
-      fi
       ;;
     ubuntu|debian)
       install_debian_deps
       install_rustup_if_missing
-      if [[ "$INSTALL_HYPRLAND" == "1" ]]; then
-        log "Hyprland is not packaged consistently on Debian/Ubuntu. Follow the GUI's install page for the supported path."
-      fi
       ;;
     nixos)
       install_nix_deps
       install_rustup_if_missing
-      if [[ "$INSTALL_HYPRLAND" == "1" ]]; then
-        install_hyprland_nix
-      fi
       ;;
     *)
       log "Unsupported distro: ${ID:-unknown}"
