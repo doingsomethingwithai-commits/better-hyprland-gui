@@ -230,6 +230,65 @@ fn checkout_repo_ref(repo_dir: &Path, version_ref: &str) -> Result<(), String> {
     ))
 }
 
+fn update_repo_checkout(repo_dir: &Path) -> Result<(), String> {
+    let current_branch_output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|err| format!("Failed to start git branch detection: {err}"))?;
+
+    let current_branch = if current_branch_output.status.success() {
+        String::from_utf8_lossy(&current_branch_output.stdout)
+            .trim()
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    let remote_branch = if !current_branch.is_empty() && current_branch != "HEAD" {
+        format!("origin/{current_branch}")
+    } else {
+        "origin/main".to_string()
+    };
+
+    let fetch_output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["fetch", "--prune", "--tags", "origin"])
+        .output()
+        .map_err(|err| format!("Failed to start git fetch: {err}"))?;
+
+    if !fetch_output.status.success() {
+        return Err(format!(
+            "The git fetch command failed.\n\n{}",
+            String::from_utf8_lossy(&fetch_output.stderr)
+        ));
+    }
+
+    let reset_candidates = [remote_branch, "origin/main".to_string(), "HEAD".to_string()];
+    let mut last_error = String::new();
+
+    for candidate in reset_candidates {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["reset", "--hard", &candidate])
+            .output()
+            .map_err(|err| format!("Failed to start git reset for {candidate}: {err}"))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        last_error = String::from_utf8_lossy(&output.stderr).to_string();
+    }
+
+    Err(format!(
+        "Unable to update the repository checkout. Last git error:\n\n{last_error}"
+    ))
+}
+
 fn nix_flake_ref_for_hyprland(version_ref: Option<&str>) -> String {
     match version_ref.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) if value.contains('#') => value.to_string(),
@@ -316,68 +375,42 @@ fn update_software_from_github(parent: &ApplicationWindow, version_ref: Option<&
     let pinned_ref = version_ref.map(str::trim).filter(|value| !value.is_empty());
 
     if let Some(version_ref) = pinned_ref {
-        let mut fetch_command = Command::new("git");
-        fetch_command.arg("-C").arg(&repo_dir).args(["fetch", "--tags", "origin"]);
-
-        match fetch_command.output() {
-            Ok(output) if output.status.success() => {
-                match checkout_repo_ref(&repo_dir, version_ref) {
-                    Ok(()) => {
-                        rebuild_software_from_repo(parent, &repo_dir);
-                    }
-                    Err(err) => {
-                        show_install_result(
-                            parent,
-                            "Software Update Failed",
-                            false,
-                            &err,
-                        );
-                    }
+        match update_repo_checkout(&repo_dir) {
+            Ok(()) => match checkout_repo_ref(&repo_dir, version_ref) {
+                Ok(()) => {
+                    rebuild_software_from_repo(parent, &repo_dir);
                 }
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                show_install_result(
-                    parent,
-                    "Software Update Failed",
-                    false,
-                    &format!("The git fetch command failed.\n\n{}", stderr),
-                );
-            }
+                Err(err) => {
+                    show_install_result(
+                        parent,
+                        "Software Update Failed",
+                        false,
+                        &err,
+                    );
+                }
+            },
             Err(err) => {
                 show_install_result(
                     parent,
                     "Software Update Failed",
                     false,
-                    &format!("Failed to start the git fetch command: {}", err),
+                    &err,
                 );
             }
         }
         return;
     }
 
-    let mut git_command = Command::new("git");
-    git_command.arg("-C").arg(&repo_dir).args(["pull", "--rebase"]);
-
-    match git_command.output() {
-        Ok(output) if output.status.success() => {
+    match update_repo_checkout(&repo_dir) {
+        Ok(()) => {
             rebuild_software_from_repo(parent, &repo_dir);
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            show_install_result(
-                parent,
-                "Software Update Failed",
-                false,
-                &format!("The Git update command failed.\n\n{}", stderr),
-            );
         }
         Err(err) => {
             show_install_result(
                 parent,
                 "Software Update Failed",
                 false,
-                &format!("Failed to start the Git update command: {}", err),
+                &err,
             );
         }
     }

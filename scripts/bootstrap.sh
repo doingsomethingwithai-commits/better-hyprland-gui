@@ -16,18 +16,70 @@ have() {
   command -v "$1" >/dev/null 2>&1
 }
 
+find_repo_root() {
+  local start_dir="$1"
+  local current_dir="$start_dir"
+
+  while [[ -n "$current_dir" && "$current_dir" != "/" ]]; do
+    if [[ -d "$current_dir/.git" ]]; then
+      printf '%s\n' "$current_dir"
+      return 0
+    fi
+    current_dir="$(dirname "$current_dir")"
+  done
+
+  return 1
+}
+
+resolve_target_dir() {
+  if find_repo_root "$PWD" >/dev/null 2>&1; then
+    find_repo_root "$PWD"
+    return 0
+  fi
+
+  printf '%s\n' "$APP_DIR"
+}
+
 checkout_version_ref() {
-  local ref="$1"
+  local repo_dir="$1"
+  local ref="$2"
   local candidate
   local candidates=("$ref" "origin/$ref" "refs/tags/$ref")
 
   for candidate in "${candidates[@]}"; do
-    if git -C "$APP_DIR" checkout --force "$candidate" >/dev/null 2>&1; then
+    if git -C "$repo_dir" checkout --force "$candidate" >/dev/null 2>&1; then
       return 0
     fi
   done
 
-  git -C "$APP_DIR" checkout --force "$ref"
+  git -C "$repo_dir" checkout --force "$ref"
+}
+
+update_existing_checkout() {
+  local repo_dir="$1"
+
+  if [[ -n "$APP_REF" ]]; then
+    git -C "$repo_dir" fetch --prune --tags origin
+    checkout_version_ref "$repo_dir" "$APP_REF"
+    return 0
+  fi
+
+  local current_branch remote_branch
+  current_branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ -n "$current_branch" && "$current_branch" != "HEAD" ]]; then
+    remote_branch="origin/$current_branch"
+  else
+    remote_branch="origin/main"
+  fi
+
+  git -C "$repo_dir" fetch --prune --tags origin
+  if git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/${remote_branch}"; then
+    git -C "$repo_dir" reset --hard "$remote_branch"
+  elif git -C "$repo_dir" show-ref --verify --quiet refs/remotes/origin/main; then
+    git -C "$repo_dir" reset --hard origin/main
+  else
+    git -C "$repo_dir" reset --hard HEAD
+  fi
 }
 
 source_os_release() {
@@ -68,34 +120,41 @@ install_nix_deps() {
 }
 
 clone_or_update_repo() {
-  if [[ -d "$APP_DIR/.git" ]]; then
-    log "Updating existing checkout in $APP_DIR"
+  local target_dir
+  target_dir="$(resolve_target_dir)"
+
+  if [[ -d "$target_dir/.git" ]]; then
+    log "Updating existing checkout in $target_dir"
     if [[ -n "$APP_REF" ]]; then
-      git -C "$APP_DIR" fetch --tags origin
-      checkout_version_ref "$APP_REF"
+      git -C "$target_dir" fetch --prune --tags origin
+      checkout_version_ref "$target_dir" "$APP_REF"
     else
-      git -C "$APP_DIR" pull --rebase
+      update_existing_checkout "$target_dir"
     fi
   else
     log "Cloning repository into $APP_DIR"
     git clone "$REPO_URL" "$APP_DIR"
     if [[ -n "$APP_REF" ]]; then
       git -C "$APP_DIR" fetch --tags origin
-      checkout_version_ref "$APP_REF"
+      checkout_version_ref "$APP_DIR" "$APP_REF"
     fi
   fi
 }
 
 build_app() {
+  local target_dir
+  target_dir="$(resolve_target_dir)"
   log "Building Better Hyprland GUI"
   (
-    cd "$APP_DIR"
+    cd "$target_dir"
     cargo build --release
   )
 }
 
 install_desktop_entry() {
-  local binary_path="$APP_DIR/target/release/hyprgui"
+  local target_dir
+  target_dir="$(resolve_target_dir)"
+  local binary_path="$target_dir/target/release/hyprgui"
   local desktop_path="$DESKTOP_DIR/$DESKTOP_FILE_NAME"
 
   if [[ ! -x "$binary_path" ]]; then
@@ -126,7 +185,9 @@ launch_app() {
     return 0
   fi
 
-  local binary_path="$APP_DIR/target/release/hyprgui"
+  local target_dir
+  target_dir="$(resolve_target_dir)"
+  local binary_path="$target_dir/target/release/hyprgui"
   if [[ ! -x "$binary_path" ]]; then
     log "Built binary not found at $binary_path"
     log "Skipping automatic launch."
@@ -176,10 +237,10 @@ main() {
   log ""
   log "Done."
   log "If you want to launch it manually later:"
-  log "  \"$APP_DIR/target/release/hyprgui\""
+  log "  \"$(resolve_target_dir)/target/release/hyprgui\""
   log ""
   log "If you want to stay on the installed checkout:"
-  log "  cd \"$APP_DIR\""
+  log "  cd \"$(resolve_target_dir)\""
   if [[ -n "$APP_REF" ]]; then
     log ""
     log "Pinned ref used:"
