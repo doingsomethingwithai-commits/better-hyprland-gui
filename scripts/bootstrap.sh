@@ -31,10 +31,24 @@ find_repo_root() {
   return 1
 }
 
+script_dir() {
+  local source="${BASH_SOURCE[0]:-}"
+
+  if [[ -z "$source" || ! -f "$source" ]]; then
+    return 1
+  fi
+
+  cd "$(dirname "$source")" && pwd
+}
+
 resolve_target_dir() {
-  if find_repo_root "$PWD" >/dev/null 2>&1; then
-    find_repo_root "$PWD"
-    return 0
+  local source_dir
+
+  if source_dir="$(script_dir)"; then
+    if find_repo_root "$source_dir" >/dev/null 2>&1; then
+      find_repo_root "$source_dir"
+      return 0
+    fi
   fi
 
   printf '%s\n' "$APP_DIR"

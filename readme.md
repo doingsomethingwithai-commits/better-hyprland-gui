@@ -42,6 +42,8 @@ If the GUI update button does not work, use these fallback commands:
 
 If you run them inside a git checkout, they update or delete that checkout directly. Otherwise they fall back to `APP_DIR`.
 
+When the scripts are piped from `curl | bash`, they now ignore unrelated parent git directories and use the installed checkout path instead.
+
 `hard-update.sh` rebuilds the GUI after refreshing the checkout and then launches the rebuilt binary unless you set `NO_LAUNCH=1`.
 
 ```bash
