@@ -867,8 +867,8 @@ fn open_spotlight_guide(parent: &ApplicationWindow) {
         body_label_back.set_text(step.body);
         tip_label_back.set_text(step.tip);
         back_button_back.set_sensitive(index > 0);
-        next_button_back.set_sensitive(index + 1 < steps_back.len());
-        next_button_back.set_label(if index + 1 < steps_back.len() { "Next" } else { "Done" });
+        next_button_back.set_sensitive(true);
+        next_button_back.set_label(if index + 1 < steps_back.len() { "Next" } else { "Finish" });
     });
 
     let update_step_back = update_step.clone();
