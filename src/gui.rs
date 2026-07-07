@@ -242,6 +242,69 @@ fn software_repo_dir() -> Option<PathBuf> {
     None
 }
 
+fn executable_from_env_or_path(name: &str, env_key: &str) -> Option<PathBuf> {
+    if let Some(value) = env::var_os(env_key) {
+        let path = PathBuf::from(value);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .map(|path| path.join(name))
+            .find(|candidate| candidate.exists())
+    })
+}
+
+fn cargo_binary() -> Option<PathBuf> {
+    executable_from_env_or_path("cargo", "CARGO")
+        .or_else(|| home_dir().map(|path| path.join(".cargo").join("bin").join("cargo")))
+        .filter(|path| path.exists())
+}
+
+fn git_current_branch(repo_dir: &Path) -> Result<Option<String>, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|err| format!("Failed to start git branch detection: {err}"))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(branch))
+    }
+}
+
+fn git_remote_default_branch(repo_dir: &Path) -> Result<Option<String>, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .output()
+        .map_err(|err| format!("Failed to detect the remote default branch: {err}"))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let reference = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let branch = reference
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    Ok(branch)
+}
+
 fn entry_text_or_none(entry: &Entry) -> Option<String> {
     let text = entry.text().trim().to_string();
     if text.is_empty() {
@@ -281,20 +344,7 @@ fn checkout_repo_ref(repo_dir: &Path, version_ref: &str) -> Result<(), String> {
 }
 
 fn update_repo_checkout(repo_dir: &Path) -> Result<(), String> {
-    let current_branch_output = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .map_err(|err| format!("Failed to start git branch detection: {err}"))?;
-
-    let current_branch = if current_branch_output.status.success() {
-        String::from_utf8_lossy(&current_branch_output.stdout)
-            .trim()
-            .to_string()
-    } else {
-        String::new()
-    };
+    let current_branch = git_current_branch(repo_dir)?.unwrap_or_default();
 
     let remote_branch = if !current_branch.is_empty() && current_branch != "HEAD" {
         format!("origin/{current_branch}")
@@ -379,7 +429,17 @@ fn run_hyprland_command(
 }
 
 fn rebuild_software_from_repo(parent: &ApplicationWindow, repo_dir: &Path) {
-    let mut cargo_command = Command::new("cargo");
+    let Some(cargo_path) = cargo_binary() else {
+        show_install_result(
+            parent,
+            "Software Update Failed",
+            false,
+            "Could not find the cargo executable. Restart the session after installing Rust, or make sure ~/.cargo/bin is available to the app.",
+        );
+        return;
+    };
+
+    let mut cargo_command = Command::new(cargo_path);
     cargo_command.current_dir(repo_dir).args(["build", "--release"]);
 
     match cargo_command.output() {
@@ -471,7 +531,7 @@ fn install_hyprland_from_gui(parent: &ApplicationWindow, version_ref: Option<&st
     let command = match distro.as_str() {
         "arch" | "manjaro" | "endeavouros" | "athena" | "athenaos" => {
             let mut command = Command::new("pkexec");
-            command.args(["pacman", "-Sy", "--needed", "--noconfirm", "hyprland"]);
+            command.args(["pacman", "-Syu", "--needed", "--noconfirm", "hyprland"]);
             command
         }
         "fedora" => {
@@ -716,69 +776,127 @@ fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
             return;
         }
 
-        let mut command = Command::new("git");
-        command.arg("-C").arg(&target_path).args(["pull", "--rebase"]);
+        let mut fetch_command = Command::new("git");
+        fetch_command
+            .arg("-C")
+            .arg(&target_path)
+            .args(["fetch", "--prune", "--tags", "origin"]);
 
-        match command.output() {
-            Ok(output) if output.status.success() => {
+        match fetch_command.output() {
+            Ok(fetch_output) if fetch_output.status.success() => {
                 if profile.version_ref.trim().is_empty() {
-                    show_install_result(
-                        parent,
-                        "Dotfiles Updated",
-                        true,
-                        "The selected .file profile was updated successfully.",
-                    );
-                } else {
-                    let mut fetch_command = Command::new("git");
-                    fetch_command
-                        .arg("-C")
-                        .arg(&target_path)
-                        .args(["fetch", "--tags", "origin"]);
+                    match git_current_branch(&target_path) {
+                        Ok(Some(branch)) if branch != "HEAD" => {
+                            let mut command = Command::new("git");
+                            command.arg("-C").arg(&target_path).args(["pull", "--rebase"]);
 
-                    match fetch_command.output() {
-                        Ok(fetch_output) if fetch_output.status.success() => {
-                            match checkout_repo_ref(&target_path, profile.version_ref.trim()) {
-                                Ok(()) => show_install_result(
+                            match command.output() {
+                                Ok(output) if output.status.success() => show_install_result(
                                     parent,
                                     "Dotfiles Updated",
                                     true,
-                                    "The selected .file profile was updated and switched to the requested version.",
+                                    "The selected .file profile was updated successfully.",
                                 ),
-                                Err(err) => show_install_result(
-                                    parent,
-                                    "Dotfiles Update Failed",
-                                    false,
-                                    &err,
-                                ),
+                                Ok(output) => {
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    show_install_result(
+                                        parent,
+                                        "Dotfiles Update Failed",
+                                        false,
+                                        &format!("The git pull command failed.\n\n{}", stderr),
+                                    );
+                                }
+                                Err(err) => {
+                                    show_install_result(
+                                        parent,
+                                        "Dotfiles Update Failed",
+                                        false,
+                                        &format!("Failed to start the git pull command: {}", err),
+                                    );
+                                }
                             }
                         }
-                        Ok(fetch_output) => {
-                            let stderr = String::from_utf8_lossy(&fetch_output.stderr);
-                            show_install_result(
-                                parent,
-                                "Dotfiles Update Failed",
-                                false,
-                                &format!("The git fetch command failed.\n\n{}", stderr),
-                            );
+                        Ok(_) => {
+                            let default_branch = match git_remote_default_branch(&target_path) {
+                                Ok(Some(branch)) => branch,
+                                Ok(None) => "main".to_string(),
+                                Err(err) => {
+                                    show_install_result(
+                                        parent,
+                                        "Dotfiles Update Failed",
+                                        false,
+                                        &err,
+                                    );
+                                    return;
+                                }
+                            };
+
+                            let reset_target = format!("origin/{default_branch}");
+                            let mut reset_command = Command::new("git");
+                            reset_command
+                                .arg("-C")
+                                .arg(&target_path)
+                                .args(["reset", "--hard", &reset_target]);
+
+                            match reset_command.output() {
+                                Ok(output) if output.status.success() => show_install_result(
+                                    parent,
+                                    "Dotfiles Updated",
+                                    true,
+                                    "The selected .file profile was updated successfully.",
+                                ),
+                                Ok(output) => {
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    show_install_result(
+                                        parent,
+                                        "Dotfiles Update Failed",
+                                        false,
+                                        &format!("The git reset command failed.\n\n{}", stderr),
+                                    );
+                                }
+                                Err(err) => {
+                                    show_install_result(
+                                        parent,
+                                        "Dotfiles Update Failed",
+                                        false,
+                                        &format!("Failed to start the git reset command: {}", err),
+                                    );
+                                }
+                            }
                         }
                         Err(err) => {
                             show_install_result(
                                 parent,
                                 "Dotfiles Update Failed",
                                 false,
-                                &format!("Failed to start the git fetch command: {}", err),
+                                &err,
                             );
                         }
                     }
+                } else {
+                    match checkout_repo_ref(&target_path, profile.version_ref.trim()) {
+                        Ok(()) => show_install_result(
+                            parent,
+                            "Dotfiles Updated",
+                            true,
+                            "The selected .file profile was updated and switched to the requested version.",
+                        ),
+                        Err(err) => show_install_result(
+                            parent,
+                            "Dotfiles Update Failed",
+                            false,
+                            &err,
+                        ),
+                    }
                 }
             }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+            Ok(fetch_output) => {
+                let stderr = String::from_utf8_lossy(&fetch_output.stderr);
                 show_install_result(
                     parent,
                     "Dotfiles Update Failed",
                     false,
-                    &format!("The git pull command failed.\n\n{}", stderr),
+                    &format!("The git fetch command failed.\n\n{}", stderr),
                 );
             }
             Err(err) => {
@@ -786,7 +904,7 @@ fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
                     parent,
                     "Dotfiles Update Failed",
                     false,
-                    &format!("Failed to start the git pull command: {}", err),
+                    &format!("Failed to start the git fetch command: {}", err),
                 );
             }
         }

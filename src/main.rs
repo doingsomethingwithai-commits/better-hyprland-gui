@@ -95,11 +95,13 @@ along with this program; if not, see
 fn save_config_file(gui: Rc<RefCell<gui::ConfigGUI>>) {
     let mut gui_ref = gui.borrow_mut();
     let path = get_config_path();
-    let backup_path = path.with_file_name(format!(
-        "{}{}",
-        path.file_name().unwrap().to_str().unwrap(),
-        BACKUP_SUFFIX
-    ));
+    let backup_path = match backup_path_for(&path) {
+        Ok(path) => path,
+        Err(err) => {
+            gui_ref.custom_error_popup("Backup failed", &err, true);
+            return;
+        }
+    };
 
     let config_str = match fs::read_to_string(&path) {
         Ok(s) => s,
@@ -150,11 +152,13 @@ fn save_config_file(gui: Rc<RefCell<gui::ConfigGUI>>) {
 fn undo_changes(gui: Rc<RefCell<gui::ConfigGUI>>) {
     let mut gui_ref = gui.borrow_mut();
     let path = get_config_path();
-    let backup_path = path.with_file_name(format!(
-        "{}{}",
-        path.file_name().unwrap().to_str().unwrap(),
-        BACKUP_SUFFIX
-    ));
+    let backup_path = match backup_path_for(&path) {
+        Ok(path) => path,
+        Err(err) => {
+            gui_ref.custom_error_popup("Undo Failed", &err, true);
+            return;
+        }
+    };
 
     if backup_path.exists() {
         match fs::copy(&backup_path, &path) {
@@ -206,4 +210,13 @@ fn undo_changes(gui: Rc<RefCell<gui::ConfigGUI>>) {
 
 fn get_config_path() -> PathBuf {
     Path::new(&env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(CONFIG_PATH)
+}
+
+fn backup_path_for(path: &Path) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Could not determine the configuration backup filename.".to_string())?;
+
+    Ok(path.with_file_name(format!("{file_name}{BACKUP_SUFFIX}")))
 }
