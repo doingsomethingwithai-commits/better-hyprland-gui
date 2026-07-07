@@ -17,7 +17,7 @@
 
 ## Quick Install
 
-Use this to install the GUI and its local dependencies:
+Use this to install the GUI and its local dependencies. After the build finishes, the script launches the app automatically unless you set `NO_LAUNCH=1`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
@@ -27,6 +27,12 @@ To pin a specific repository version during install, set `APP_REF` to a branch, 
 
 ```bash
 APP_REF=v0.1.0 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
+```
+
+To skip automatic launch:
+
+```bash
+NO_LAUNCH=1 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
 ```
 
 ## Recovery Commands

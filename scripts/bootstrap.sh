@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_URL="https://github.com/doingsomethingwithai-commits/better-hyprland-gui.git"
 APP_DIR="${APP_DIR:-$HOME/.local/share/better-hyprland-gui}"
 APP_REF="${APP_REF:-}"
+NO_LAUNCH="${NO_LAUNCH:-0}"
 
 log() {
   printf '%s\n' "$*"
@@ -91,6 +92,23 @@ build_app() {
   )
 }
 
+launch_app() {
+  if [[ "$NO_LAUNCH" == "1" ]]; then
+    log "Skipping app launch because NO_LAUNCH=1."
+    return 0
+  fi
+
+  local binary_path="$APP_DIR/target/release/hyprgui"
+  if [[ ! -x "$binary_path" ]]; then
+    log "Built binary not found at $binary_path"
+    log "Skipping automatic launch."
+    return 0
+  fi
+
+  log "Launching Better Hyprland GUI"
+  "$binary_path"
+}
+
 main() {
   source_os_release
 
@@ -125,10 +143,11 @@ main() {
 
   clone_or_update_repo
   build_app
+  launch_app
   log ""
   log "Done."
-  log "Run it with:"
-  log "  cargo run --release"
+  log "If you want to launch it manually later:"
+  log "  \"$APP_DIR/target/release/hyprgui\""
   log ""
   log "If you want to stay on the installed checkout:"
   log "  cd \"$APP_DIR\""
