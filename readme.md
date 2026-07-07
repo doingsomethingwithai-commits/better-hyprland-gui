@@ -33,6 +33,8 @@ APP_REF=v0.1.0 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai
 
 If the GUI update button does not work, use these fallback commands:
 
+If you run them inside a git checkout, they update or delete that checkout directly. Otherwise they fall back to `APP_DIR`.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/hard-update.sh | bash
 ```
