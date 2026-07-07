@@ -5,6 +5,8 @@ REPO_URL="https://github.com/doingsomethingwithai-commits/better-hyprland-gui.gi
 APP_DIR="${APP_DIR:-$HOME/.local/share/better-hyprland-gui}"
 APP_REF="${APP_REF:-}"
 NO_LAUNCH="${NO_LAUNCH:-0}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprgui"
+INSTALL_STATE_FILE="$CONFIG_DIR/install.env"
 
 log() {
   printf '%s\n' "$*"
@@ -130,6 +132,17 @@ build_app() {
   )
 }
 
+write_install_state() {
+  local target_dir
+  target_dir="$(resolve_target_dir)"
+
+  mkdir -p "$CONFIG_DIR"
+  cat > "$INSTALL_STATE_FILE" <<EOF
+APP_DIR=$target_dir
+HYPRGUI_REPO_DIR=$target_dir
+EOF
+}
+
 launch_app() {
   if [[ "$NO_LAUNCH" == "1" ]]; then
     log "Skipping app launch because NO_LAUNCH=1."
@@ -155,6 +168,7 @@ main() {
 
   if have cargo; then
     build_app
+    write_install_state
   else
     log "Cargo not found, skipping rebuild."
   fi

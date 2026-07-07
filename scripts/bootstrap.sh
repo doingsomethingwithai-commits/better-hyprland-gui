@@ -7,6 +7,8 @@ APP_REF="${APP_REF:-}"
 NO_LAUNCH="${NO_LAUNCH:-0}"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 DESKTOP_FILE_NAME="hyprgui.desktop"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprgui"
+INSTALL_STATE_FILE="$CONFIG_DIR/install.env"
 
 log() {
   printf '%s\n' "$*"
@@ -165,6 +167,17 @@ build_app() {
   )
 }
 
+write_install_state() {
+  local target_dir
+  target_dir="$(resolve_target_dir)"
+
+  mkdir -p "$CONFIG_DIR"
+  cat > "$INSTALL_STATE_FILE" <<EOF
+APP_DIR=$target_dir
+HYPRGUI_REPO_DIR=$target_dir
+EOF
+}
+
 install_desktop_entry() {
   local target_dir
   target_dir="$(resolve_target_dir)"
@@ -181,7 +194,7 @@ install_desktop_entry() {
 [Desktop Entry]
 Name=Better Hyprland GUI
 Comment=GUI for configuring Hyprland, dotfiles, and updates
-Exec=$binary_path
+Exec=env APP_DIR=$target_dir HYPRGUI_REPO_DIR=$target_dir $binary_path
 TryExec=$binary_path
 Icon=preferences-system
 Type=Application
@@ -257,6 +270,7 @@ main() {
 
   clone_or_update_repo
   build_app
+  write_install_state
   install_desktop_entry
   launch_app
   log ""

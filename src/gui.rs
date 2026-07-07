@@ -172,8 +172,56 @@ fn find_repo_root(start: PathBuf) -> Option<PathBuf> {
     None
 }
 
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME").map(PathBuf::from)
+}
+
+fn default_app_dir() -> Option<PathBuf> {
+    home_dir().map(|path| path.join(".local").join("share").join("better-hyprland-gui"))
+}
+
+fn install_state_path() -> Option<PathBuf> {
+    let config_root = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|path| path.join(".config")))?;
+
+    Some(config_root.join("hyprgui").join("install.env"))
+}
+
+fn install_state_repo_dirs() -> Vec<PathBuf> {
+    let Some(state_path) = install_state_path() else {
+        return Vec::new();
+    };
+
+    let Ok(contents) = fs::read_to_string(state_path) else {
+        return Vec::new();
+    };
+
+    contents
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .filter_map(|(key, value)| match key.trim() {
+            "APP_DIR" | "HYPRGUI_REPO_DIR" => {
+                let value = value.trim();
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(value))
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn software_repo_dir() -> Option<PathBuf> {
-    let mut candidates = vec![std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf()))];
+    let mut candidates = vec![
+        std::env::current_dir().ok(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf())),
+        default_app_dir(),
+    ];
 
     if let Some(app_dir) = env::var_os("APP_DIR") {
         candidates.push(Some(PathBuf::from(app_dir)));
@@ -182,6 +230,8 @@ fn software_repo_dir() -> Option<PathBuf> {
     if let Some(repo_dir) = env::var_os("HYPRGUI_REPO_DIR") {
         candidates.push(Some(PathBuf::from(repo_dir)));
     }
+
+    candidates.extend(install_state_repo_dirs().into_iter().map(Some));
 
     for candidate in candidates.into_iter().flatten() {
         if let Some(repo_root) = find_repo_root(candidate) {
