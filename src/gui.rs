@@ -611,14 +611,46 @@ fn default_file_install_path() -> String {
         .to_string()
 }
 
+fn normalize_repo_url(value: &str) -> String {
+    let trimmed = value.trim();
+
+    if let Some((_, rest)) = trimmed.split_once("](") {
+        if trimmed.starts_with('[') && rest.ends_with(')') {
+            return rest[..rest.len() - 1].trim().to_string();
+        }
+    }
+
+    trimmed
+        .trim_matches(|c| matches!(c, '<' | '>' | '"' | '\''))
+        .to_string()
+}
+
+fn expand_user_path(value: &str) -> PathBuf {
+    let trimmed = value.trim();
+
+    if trimmed == "~" {
+        return home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return home_dir()
+            .map(|path| path.join(rest))
+            .unwrap_or_else(|| PathBuf::from(trimmed));
+    }
+
+    PathBuf::from(trimmed)
+}
+
 fn file_profile_clone_command(profile: &FileProfile) -> String {
     let install_path = if profile.install_path.trim().is_empty() {
         default_file_install_path()
     } else {
-        profile.install_path.trim().to_string()
+        expand_user_path(profile.install_path.trim())
+            .to_string_lossy()
+            .to_string()
     };
 
-    let repo_url = profile.repo_url.trim();
+    let repo_url = normalize_repo_url(&profile.repo_url);
     let version_ref = profile.version_ref.trim();
 
     if version_ref.is_empty() {
@@ -629,7 +661,7 @@ fn file_profile_clone_command(profile: &FileProfile) -> String {
 }
 
 fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
-    let repo_url = profile.repo_url.trim();
+    let repo_url = normalize_repo_url(&profile.repo_url);
     if repo_url.is_empty() {
         show_message_dialog(
             parent,
@@ -643,12 +675,38 @@ fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
     let install_path = if profile.install_path.trim().is_empty() {
         default_file_install_path()
     } else {
-        profile.install_path.trim().to_string()
+        expand_user_path(profile.install_path.trim())
+            .to_string_lossy()
+            .to_string()
     };
 
     let target_path = PathBuf::from(&install_path);
     if target_path.exists() {
         if !target_path.join(".git").exists() {
+            let is_empty_dir = target_path.is_dir()
+                && fs::read_dir(&target_path)
+                    .ok()
+                    .map(|mut entries| entries.next().is_none())
+                    .unwrap_or(false);
+
+            if is_empty_dir {
+                let mut command = Command::new("git");
+                command.arg("clone");
+                if !profile.version_ref.trim().is_empty() {
+                    command.args(["--branch", profile.version_ref.trim()]);
+                }
+                command.arg(&repo_url).arg(&install_path);
+
+                run_hyprland_command(
+                    parent,
+                    command,
+                    "Dotfiles Installed",
+                    "The selected .file profile was installed successfully.",
+                    "Dotfiles Install Failed",
+                );
+                return;
+            }
+
             show_message_dialog(
                 parent,
                 gtk::MessageType::Warning,
@@ -753,7 +811,7 @@ fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
     if !profile.version_ref.trim().is_empty() {
         command.args(["--branch", profile.version_ref.trim()]);
     }
-    command.arg(repo_url).arg(&install_path);
+    command.arg(&repo_url).arg(&install_path);
 
     run_hyprland_command(
         parent,
