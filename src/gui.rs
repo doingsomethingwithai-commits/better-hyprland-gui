@@ -1697,12 +1697,12 @@ impl ConfigGUI {
         container.set_margin_start(16);
         container.set_margin_end(16);
 
-        let title_label = Label::new(Some("Hyprland Installation"));
-        title_label.set_markup("<b>Hyprland Installation</b>");
+        let title_label = Label::new(Some("Hyprland Updates"));
+        title_label.set_markup("<b>Hyprland Updates</b>");
         title_label.set_halign(gtk::Align::Start);
 
         let description_label = Label::new(Some(
-            "Use the buttons below to install or update Hyprland. The GUI detects your Linux distribution and runs the matching package-manager command automatically.",
+            "Use the buttons below to install or update Hyprland. The GUI detects your Linux distribution and runs the matching package-manager action automatically. Leave the version fields empty for the latest release, or enter a branch, tag, commit SHA, or NixOS flake ref to pin a specific version.",
         ));
         description_label.set_wrap(true);
         description_label.set_halign(gtk::Align::Start);
@@ -1717,25 +1717,23 @@ impl ConfigGUI {
             "Optional: nixpkgs/release-20.09 or github:NixOS/nixpkgs/<ref> (NixOS only)",
         ));
 
-        let software_version_label = Label::new(Some("Software version / ref"));
+        let software_version_label = Label::new(Some("GUI version / ref"));
         software_version_label.set_halign(gtk::Align::Start);
         software_version_label.set_opacity(0.85);
 
         let software_version_entry = Entry::new();
         software_version_entry.set_placeholder_text(Some("Optional: branch, tag, or commit SHA"));
 
+        let version_help_label = Label::new(Some(
+            "Examples: `main`, `v0.1.0`, `dc92648`, or `github:NixOS/nixpkgs/<ref>` on NixOS.",
+        ));
+        version_help_label.set_wrap(true);
+        version_help_label.set_halign(gtk::Align::Start);
+        version_help_label.set_opacity(0.72);
+
         let install_hyprland_button = Button::with_label("Install Hyprland");
         let update_hyprland_button = Button::with_label("Update Hyprland");
         let update_software_button = Button::with_label("Update Software");
-        let open_install_button = Button::with_label("Open Installation Guide");
-        let open_update_button = Button::with_label("Open Update Guide");
-        let open_tutorial_button = Button::with_label("Open Master Tutorial");
-        let open_setup_button = Button::with_label("Open Preconfigured Setups");
-
-        let install_url = "https://wiki.hypr.land/Getting-Started/Installation/";
-        let update_url = "https://wiki.hypr.land/FAQ/";
-        let tutorial_url = "https://wiki.hypr.land/Getting-Started/Master-Tutorial/";
-        let setups_url = "https://wiki.hypr.land/Getting-Started/Preconfigured-setups/";
 
         let parent = self.window.clone();
         let hyprland_version_for_install = hyprland_version_entry.clone();
@@ -1758,37 +1756,13 @@ impl ConfigGUI {
             update_software_from_github(&parent, version_ref.as_deref());
         });
 
-        let parent = self.window.clone();
-        open_install_button.connect_clicked(move |_| {
-            open_uri(&parent, install_url);
-        });
-
-        let parent = self.window.clone();
-        open_update_button.connect_clicked(move |_| {
-            open_uri(&parent, update_url);
-        });
-
-        let parent = self.window.clone();
-        open_tutorial_button.connect_clicked(move |_| {
-            open_uri(&parent, tutorial_url);
-        });
-
-        let parent = self.window.clone();
-        open_setup_button.connect_clicked(move |_| {
-            open_uri(&parent, setups_url);
-        });
-
         let button_row = Box::new(Orientation::Horizontal, 10);
         button_row.append(&install_hyprland_button);
         button_row.append(&update_hyprland_button);
         button_row.append(&update_software_button);
-        button_row.append(&open_install_button);
-        button_row.append(&open_update_button);
-        button_row.append(&open_tutorial_button);
-        button_row.append(&open_setup_button);
 
         let checklist_label = Label::new(Some(
-            "Recommended path: use the install, Hyprland update, or software update buttons on this page, then follow the master tutorial after Hyprland is installed.",
+            "Recommended path: choose a version or ref if needed, then click the install, Hyprland update, or software update button.",
         ));
         checklist_label.set_wrap(true);
         checklist_label.set_halign(gtk::Align::Start);
@@ -1800,6 +1774,7 @@ impl ConfigGUI {
         container.append(&hyprland_version_entry);
         container.append(&software_version_label);
         container.append(&software_version_entry);
+        container.append(&version_help_label);
         container.append(&button_row);
         container.append(&checklist_label);
 
