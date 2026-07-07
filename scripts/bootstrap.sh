@@ -165,18 +165,29 @@ install_desktop_entry() {
   mkdir -p "$DESKTOP_DIR"
   cat > "$desktop_path" <<EOF
 [Desktop Entry]
-Name=HyprGUI
-Comment=GUI for configuring Hyprland, written in Rust
+Name=Better Hyprland GUI
+Comment=GUI for configuring Hyprland, dotfiles, and updates
 Exec=$binary_path
+TryExec=$binary_path
 Icon=preferences-system
 Type=Application
 Terminal=false
-Categories=Utility;Settings;
+Categories=Settings;Utility;
+Keywords=Hyprland;Wayland;dotfiles;configuration;settings;
 StartupNotify=true
 StartupWMClass=hyprgui
+NoDisplay=false
 EOF
 
   log "Installed desktop entry to $desktop_path"
+
+  if have update-desktop-database; then
+    update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+  fi
+
+  if have xdg-desktop-menu; then
+    xdg-desktop-menu forceupdate >/dev/null 2>&1 || true
+  fi
 }
 
 launch_app() {

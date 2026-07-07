@@ -1,8 +1,13 @@
 [Desktop Entry]
-Name=HyprGUI
-Comment=GUI for configuring Hyprland, written in blazingly fast Rust!
+Name=Better Hyprland GUI
+Comment=GUI for configuring Hyprland, dotfiles, and updates
 Exec=/usr/bin/hyprgui
+TryExec=/usr/bin/hyprgui
 Icon=preferences-system
 Type=Application
 Terminal=false
-Categories=Utility;
+Categories=Settings;Utility;
+Keywords=Hyprland;Wayland;dotfiles;configuration;settings;
+StartupNotify=true
+StartupWMClass=hyprgui
+NoDisplay=false
