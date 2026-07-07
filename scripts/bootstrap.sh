@@ -5,6 +5,8 @@ REPO_URL="https://github.com/doingsomethingwithai-commits/better-hyprland-gui.gi
 APP_DIR="${APP_DIR:-$HOME/.local/share/better-hyprland-gui}"
 APP_REF="${APP_REF:-}"
 NO_LAUNCH="${NO_LAUNCH:-0}"
+DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+DESKTOP_FILE_NAME="hyprgui.desktop"
 
 log() {
   printf '%s\n' "$*"
@@ -92,6 +94,32 @@ build_app() {
   )
 }
 
+install_desktop_entry() {
+  local binary_path="$APP_DIR/target/release/hyprgui"
+  local desktop_path="$DESKTOP_DIR/$DESKTOP_FILE_NAME"
+
+  if [[ ! -x "$binary_path" ]]; then
+    log "Skipping desktop entry installation because the binary is missing."
+    return 0
+  fi
+
+  mkdir -p "$DESKTOP_DIR"
+  cat > "$desktop_path" <<EOF
+[Desktop Entry]
+Name=HyprGUI
+Comment=GUI for configuring Hyprland, written in Rust
+Exec=$binary_path
+Icon=preferences-system
+Type=Application
+Terminal=false
+Categories=Utility;Settings;
+StartupNotify=true
+StartupWMClass=hyprgui
+EOF
+
+  log "Installed desktop entry to $desktop_path"
+}
+
 launch_app() {
   if [[ "$NO_LAUNCH" == "1" ]]; then
     log "Skipping app launch because NO_LAUNCH=1."
@@ -143,6 +171,7 @@ main() {
 
   clone_or_update_repo
   build_app
+  install_desktop_entry
   launch_app
   log ""
   log "Done."

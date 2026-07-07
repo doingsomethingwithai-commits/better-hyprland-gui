@@ -18,6 +18,7 @@
 ## Quick Install
 
 Use this to install the GUI and its local dependencies. After the build finishes, the script launches the app automatically unless you set `NO_LAUNCH=1`:
+It also installs a desktop launcher entry into your user applications folder, so the GUI should appear in your app menu.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
