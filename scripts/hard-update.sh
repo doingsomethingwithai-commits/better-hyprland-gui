@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_URL="https://github.com/doingsomethingwithai-commits/better-hyprland-gui.git"
 APP_DIR="${APP_DIR:-$HOME/.local/share/better-hyprland-gui}"
 APP_REF="${APP_REF:-}"
+NO_LAUNCH="${NO_LAUNCH:-0}"
 
 log() {
   printf '%s\n' "$*"
@@ -115,6 +116,25 @@ build_app() {
   )
 }
 
+launch_app() {
+  if [[ "$NO_LAUNCH" == "1" ]]; then
+    log "Skipping app launch because NO_LAUNCH=1."
+    return 0
+  fi
+
+  local target_dir
+  target_dir="$(resolve_target_dir)"
+  local binary_path="$target_dir/target/release/hyprgui"
+  if [[ ! -x "$binary_path" ]]; then
+    log "Built binary not found at $binary_path"
+    log "Skipping automatic launch."
+    return 0
+  fi
+
+  log "Launching Better Hyprland GUI"
+  "$binary_path"
+}
+
 main() {
   clone_or_update_repo
   install_rustup_if_missing
@@ -125,14 +145,16 @@ main() {
     log "Cargo not found, skipping rebuild."
   fi
 
+  launch_app
+
   local target_dir
   target_dir="$(resolve_target_dir)"
 
   log ""
   log "Done."
   log "Run it with:"
-  log "  cd \"$target_dir\""
-  log "  cargo run --release"
+  log "  \"$target_dir/target/release/hyprgui\""
+  log "Or reinstall the launcher via the bootstrap script if you want the menu entry refreshed."
   if [[ -n "$APP_REF" ]]; then
     log ""
     log "Pinned ref used:"

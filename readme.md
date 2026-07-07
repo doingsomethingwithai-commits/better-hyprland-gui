@@ -42,8 +42,16 @@ If the GUI update button does not work, use these fallback commands:
 
 If you run them inside a git checkout, they update or delete that checkout directly. Otherwise they fall back to `APP_DIR`.
 
+`hard-update.sh` rebuilds the GUI after refreshing the checkout and then launches the rebuilt binary unless you set `NO_LAUNCH=1`.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/hard-update.sh | bash
+```
+
+To rebuild without launching the app afterwards:
+
+```bash
+NO_LAUNCH=1 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/hard-update.sh | bash
 ```
 
 ```bash
@@ -102,8 +110,9 @@ cargo run --release
 2. Open the Hyprland install page and click the install, Hyprland update, or software update button.
 3. If the app is broken, run the hard update command from the repo.
 4. If you need a clean slate, run the hard delete command from the repo and reinstall.
-5. Open the dotfiles page and paste a GitHub repository URL.
-6. Return to the main config pages and tune Hyprland settings.
+5. If the app still does not appear in your desktop menu after a reinstall, rerun the bootstrap script so the launcher entry is refreshed.
+6. Open the dotfiles page and paste a GitHub repository URL.
+7. Return to the main config pages and tune Hyprland settings.
 
 ## Why This Layout
 
