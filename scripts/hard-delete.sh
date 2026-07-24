@@ -12,7 +12,7 @@ find_repo_root() {
   local current_dir="$start_dir"
 
   while [[ -n "$current_dir" && "$current_dir" != "/" ]]; do
-    if [[ -d "$current_dir/.git" ]]; then
+    if [[ -e "$current_dir/.git" ]]; then
       printf '%s\n' "$current_dir"
       return 0
     fi
@@ -52,12 +52,31 @@ if [[ ! -e "$TARGET_DIR" ]]; then
   exit 0
 fi
 
+if command -v realpath >/dev/null 2>&1; then
+  TARGET_DIR="$(realpath "$TARGET_DIR")"
+  HOME_DIR="$(realpath "$HOME")"
+else
+  TARGET_DIR="$(cd "$TARGET_DIR" && pwd -P)"
+  HOME_DIR="$(cd "$HOME" && pwd -P)"
+fi
+
 case "$TARGET_DIR" in
-  "$HOME"|"${HOME}/"|"/"|""|".")
-    log "Refusing to delete an unsafe path: $TARGET_DIR"
+  "$HOME_DIR"/*) ;;
+  *)
+    log "Refusing to delete a path outside the home directory: $TARGET_DIR"
     exit 1
     ;;
 esac
+
+if [[ ! -e "$TARGET_DIR/.git" || ! -f "$TARGET_DIR/Cargo.toml" ]]; then
+  log "Refusing to delete a directory that is not a Better Hyprland GUI checkout: $TARGET_DIR"
+  exit 1
+fi
+
+if ! grep -Eq '^[[:space:]]*name[[:space:]]*=[[:space:]]*"hyprgui"[[:space:]]*$' "$TARGET_DIR/Cargo.toml"; then
+  log "Refusing to delete a checkout whose Cargo package is not hyprgui: $TARGET_DIR"
+  exit 1
+fi
 
 rm -rf -- "$TARGET_DIR"
 log "Deleted $TARGET_DIR"

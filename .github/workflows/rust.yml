@@ -7,12 +7,18 @@ on:
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'hyprparser/Cargo.toml'
+      - 'scripts/**'
+      - '.github/workflows/rust.yml'
   pull_request:
     paths:
       - '**/*.rs'
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'hyprparser/Cargo.toml'
+      - 'scripts/**'
+      - '.github/workflows/rust.yml'
   workflow_dispatch:
 
 jobs:
@@ -33,13 +39,10 @@ jobs:
             libgtk-4-dev \
             libsoup2.4-dev
 
-      - name: Set up dependencies
-        run: |
-          export SYSTEM_DEPS_PANGO_NO_PKG_CONFIG="true"
-          export SYSTEM_DEPS_PANGO_LIB="pango-1.0"
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Build
         run: |
@@ -64,15 +67,28 @@ jobs:
             libgtk-4-dev \
             libsoup2.4-dev
 
-      - name: Set up dependencies
-        run: |
-          export SYSTEM_DEPS_PANGO_NO_PKG_CONFIG="true"
-          export SYSTEM_DEPS_PANGO_LIB="pango-1.0"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets
 
       - name: Run cargo clippy
         run: |
-          cargo clippy -- -Dwarnings
-          cargo clippy --release -- -Dwarnings
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --release --workspace --all-targets -- -D warnings
 
       - name: Run cargo fmt
         run: cargo fmt --all --check
+
+      - name: Audit Rust dependencies
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
+
+      - name: Check shell scripts
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh

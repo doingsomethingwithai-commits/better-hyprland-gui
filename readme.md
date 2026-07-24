@@ -20,6 +20,9 @@
 Use this to install the GUI and its local dependencies. After the build finishes, the script launches the app automatically unless you set `NO_LAUNCH=1`:
 It also installs a desktop launcher entry into your user applications folder, so the GUI should appear in your app menu.
 
+> [!IMPORTANT]
+> Review downloaded install scripts before piping them to a shell. The command below downloads the bootstrap script from `main` and may request administrator privileges to install system packages.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
 ```
@@ -29,6 +32,8 @@ To pin a specific repository version during install, set `APP_REF` to a branch, 
 ```bash
 APP_REF=v0.1.0 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/bootstrap.sh | bash
 ```
+
+`APP_REF` pins the cloned application checkout. The bootstrap script itself still comes from `main`; for a fully pinned installation, download `scripts/bootstrap.sh` from the same tag or commit and inspect it before running it.
 
 To skip automatic launch:
 
@@ -40,11 +45,11 @@ NO_LAUNCH=1 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-co
 
 If the GUI update button does not work, use these fallback commands:
 
-If you run them inside a git checkout, they update or delete that checkout directly. Otherwise they fall back to `APP_DIR`.
+If you run them inside this repository, they update or delete this checkout directly. Otherwise they fall back to `APP_DIR`.
 
 When the scripts are piped from `curl | bash`, they now ignore unrelated parent git directories and use the installed checkout path instead.
 
-`hard-update.sh` rebuilds the GUI after refreshing the checkout and then launches the rebuilt binary unless you set `NO_LAUNCH=1`.
+`hard-update.sh` rebuilds the GUI after refreshing the checkout and then launches the rebuilt binary unless you set `NO_LAUNCH=1`. Updates now require a clean checkout and a fast-forwardable branch; commit or stash local changes first.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/hard-update.sh | bash
@@ -61,6 +66,9 @@ APP_REF=v0.1.0 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai
 ```
 
 If you need to remove the whole local checkout first:
+
+> [!WARNING]
+> This permanently removes the detected Better Hyprland GUI checkout. The script refuses paths outside your home directory and verifies the `hyprgui` Cargo package before deleting anything.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/hard-delete.sh | bash
@@ -83,15 +91,16 @@ That keeps the install flow inside the GUI and avoids a separate Hyprland one-li
 
 ## Notes
 
-- Hyprland is officially tested on Arch Linux and NixOS.
-- Athena OS is handled as an Arch-like path in the bootstrap script.
-- Other Linux distributions may work, but support and package availability can vary.
+- Hyprland installation and update flows are officially tested on Arch Linux and NixOS.
+- Athena OS, Manjaro, and EndeavourOS use the Arch-style package path.
+- Fedora and openSUSE have package-manager integrations, but package availability can vary.
+- Ubuntu and Debian can bootstrap the GUI build dependencies, but the GUI does not automatically install Hyprland there.
 - The bootstrap script only prepares the system and starts the app.
 
 ## Manual Build
 
 1. Install Rust with `rustup` or your distro package manager.
-2. Install `git`, `gtk4`, and `pango` development packages.
+2. Install `git`, `gtk4`, `pango`, Cairo, ATK, `pkg-config`, and a C build toolchain.
 3. Clone this repository:
 
 ```bash

@@ -15,6 +15,10 @@ keywords = [
 categories = ["gui"]
 edition = "2021"
 
+[workspace]
+members = ["hyprparser"]
+resolver = "2"
+
 [dependencies]
 gtk = { version = "0.9.2", package = "gtk4" }
 hyprparser = { path = "hyprparser" }

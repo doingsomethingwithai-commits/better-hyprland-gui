@@ -1,20 +1,23 @@
 use gtk::{
-    gdk, gio, glib, prelude::*, Application, ApplicationWindow, Box, Button, ColorButton,
-    DropDown, Entry, Frame, HeaderBar, Image, Label, ListBox, ListBoxRow, MessageDialog,
-    Orientation, Popover, ScrolledWindow, Separator, SpinButton, Stack, StackSidebar, StringList,
-    Switch, Widget,
+    gdk, gio, glib, prelude::*, Application, ApplicationWindow, Box, Button, ColorButton, DropDown,
+    Entry, Frame, HeaderBar, Image, Label, ListBox, ListBoxRow, MessageDialog, Orientation,
+    Popover, ScrolledWindow, Separator, SpinButton, Stack, StackSidebar, StringList, Switch,
+    Widget,
 };
 
 use hyprparser::HyprlandConfig;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs;
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
-use serde::{Deserialize, Serialize};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -172,12 +175,31 @@ fn find_repo_root(start: PathBuf) -> Option<PathBuf> {
     None
 }
 
+fn is_hyprgui_repo(path: &Path) -> bool {
+    let manifest = path.join("Cargo.toml");
+    let main_source = path.join("src").join("main.rs");
+
+    main_source.is_file()
+        && fs::read_to_string(manifest)
+            .map(|content| {
+                content.lines().any(|line| {
+                    let compact = line.split_whitespace().collect::<String>();
+                    compact == "name=\"hyprgui\""
+                })
+            })
+            .unwrap_or(false)
+}
+
 fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
 }
 
 fn default_app_dir() -> Option<PathBuf> {
-    home_dir().map(|path| path.join(".local").join("share").join("better-hyprland-gui"))
+    home_dir().map(|path| {
+        path.join(".local")
+            .join("share")
+            .join("better-hyprland-gui")
+    })
 }
 
 fn install_state_path() -> Option<PathBuf> {
@@ -215,13 +237,7 @@ fn install_state_repo_dirs() -> Vec<PathBuf> {
 }
 
 fn software_repo_dir() -> Option<PathBuf> {
-    let mut candidates = vec![
-        std::env::current_dir().ok(),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf())),
-        default_app_dir(),
-    ];
+    let mut candidates = Vec::new();
 
     if let Some(app_dir) = env::var_os("APP_DIR") {
         candidates.push(Some(PathBuf::from(app_dir)));
@@ -232,10 +248,19 @@ fn software_repo_dir() -> Option<PathBuf> {
     }
 
     candidates.extend(install_state_repo_dirs().into_iter().map(Some));
+    candidates.push(
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf())),
+    );
+    candidates.push(default_app_dir());
+    candidates.push(std::env::current_dir().ok());
 
     for candidate in candidates.into_iter().flatten() {
         if let Some(repo_root) = find_repo_root(candidate) {
-            return Some(repo_root);
+            if is_hyprgui_repo(&repo_root) {
+                return Some(repo_root);
+            }
         }
     }
 
@@ -283,28 +308,6 @@ fn git_current_branch(repo_dir: &Path) -> Result<Option<String>, String> {
     }
 }
 
-fn git_remote_default_branch(repo_dir: &Path) -> Result<Option<String>, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .output()
-        .map_err(|err| format!("Failed to detect the remote default branch: {err}"))?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    let reference = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let branch = reference
-        .rsplit('/')
-        .next()
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-
-    Ok(branch)
-}
-
 fn entry_text_or_none(entry: &Entry) -> Option<String> {
     let text = entry.text().trim().to_string();
     if text.is_empty() {
@@ -314,7 +317,67 @@ fn entry_text_or_none(entry: &Entry) -> Option<String> {
     }
 }
 
+fn validate_version_ref(version_ref: &str) -> Result<&str, String> {
+    let trimmed = version_ref.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('-')
+        || trimmed.chars().any(char::is_control)
+        || trimmed.chars().any(char::is_whitespace)
+    {
+        return Err(
+            "The requested version ref is empty or contains unsafe characters.".to_string(),
+        );
+    }
+
+    Ok(trimmed)
+}
+
+fn ensure_repo_clean(repo_dir: &Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["status", "--porcelain"])
+        .output()
+        .map_err(|err| format!("Failed to inspect repository changes: {err}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Git could not inspect the repository state.\n\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    if !output.stdout.is_empty() {
+        return Err(
+            "The repository contains local changes. Commit or stash them before updating."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn fetch_repo(repo_dir: &Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["fetch", "--prune", "--tags", "origin"])
+        .output()
+        .map_err(|err| format!("Failed to start git fetch: {err}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "The git fetch command failed.\n\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
 fn checkout_repo_ref(repo_dir: &Path, version_ref: &str) -> Result<(), String> {
+    ensure_repo_clean(repo_dir)?;
+    let version_ref = validate_version_ref(version_ref)?;
     let candidates = [
         version_ref.to_string(),
         format!("origin/{version_ref}"),
@@ -327,7 +390,7 @@ fn checkout_repo_ref(repo_dir: &Path, version_ref: &str) -> Result<(), String> {
         let output = Command::new("git")
             .arg("-C")
             .arg(repo_dir)
-            .args(["checkout", "--force", &candidate])
+            .args(["checkout", "--detach", &candidate])
             .output()
             .map_err(|err| format!("Failed to start git checkout for {candidate}: {err}"))?;
 
@@ -344,131 +407,116 @@ fn checkout_repo_ref(repo_dir: &Path, version_ref: &str) -> Result<(), String> {
 }
 
 fn update_repo_checkout(repo_dir: &Path) -> Result<(), String> {
+    ensure_repo_clean(repo_dir)?;
     let current_branch = git_current_branch(repo_dir)?.unwrap_or_default();
+    fetch_repo(repo_dir)?;
 
-    let remote_branch = if !current_branch.is_empty() && current_branch != "HEAD" {
-        format!("origin/{current_branch}")
-    } else {
-        "origin/main".to_string()
-    };
+    if current_branch.is_empty() || current_branch == "HEAD" {
+        return Err(
+            "The repository is in detached-HEAD state. Enter an explicit version ref or switch to a branch before updating."
+                .to_string(),
+        );
+    }
 
-    let fetch_output = Command::new("git")
+    let remote_branch = format!("origin/{current_branch}");
+    let verify = Command::new("git")
         .arg("-C")
         .arg(repo_dir)
-        .args(["fetch", "--prune", "--tags", "origin"])
+        .args(["rev-parse", "--verify", &remote_branch])
         .output()
-        .map_err(|err| format!("Failed to start git fetch: {err}"))?;
-
-    if !fetch_output.status.success() {
+        .map_err(|err| format!("Failed to verify {remote_branch}: {err}"))?;
+    if !verify.status.success() {
         return Err(format!(
-            "The git fetch command failed.\n\n{}",
-            String::from_utf8_lossy(&fetch_output.stderr)
+            "The current branch '{current_branch}' has no matching origin branch."
         ));
     }
 
-    let reset_candidates = [remote_branch, "origin/main".to_string(), "HEAD".to_string()];
-    let mut last_error = String::new();
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["merge", "--ff-only", &remote_branch])
+        .output()
+        .map_err(|err| format!("Failed to fast-forward from {remote_branch}: {err}"))?;
 
-    for candidate in reset_candidates {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(repo_dir)
-            .args(["reset", "--hard", &candidate])
-            .output()
-            .map_err(|err| format!("Failed to start git reset for {candidate}: {err}"))?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-
-        last_error = String::from_utf8_lossy(&output.stderr).to_string();
-    }
-
-    Err(format!(
-        "Unable to update the repository checkout. Last git error:\n\n{last_error}"
-    ))
-}
-
-fn nix_flake_ref_for_hyprland(version_ref: Option<&str>) -> String {
-    match version_ref.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) if value.contains('#') => value.to_string(),
-        Some(value) => format!("{value}#hyprland"),
-        None => "nixpkgs#hyprland".to_string(),
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "The update is not a safe fast-forward. Resolve the branch manually.\n\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 
-fn run_hyprland_command(
+fn run_background_task<F>(
     parent: &ApplicationWindow,
-    mut command: Command,
     success_title: &str,
     success_message: &str,
     failure_title: &str,
-) {
-    match command.output() {
-        Ok(output) if output.status.success() => {
-            show_install_result(parent, success_title, true, success_message);
+    task: F,
+) where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(task());
+    });
+
+    let parent = parent.clone();
+    let success_title = success_title.to_string();
+    let success_message = success_message.to_string();
+    let failure_title = failure_title.to_string();
+
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        match receiver.try_recv() {
+            Ok(Ok(())) => {
+                show_install_result(&parent, &success_title, true, &success_message);
+                glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                show_install_result(&parent, &failure_title, false, &error);
+                glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                show_install_result(
+                    &parent,
+                    &failure_title,
+                    false,
+                    "The background task stopped unexpectedly.",
+                );
+                glib::ControlFlow::Break
+            }
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            show_install_result(
-                parent,
-                failure_title,
-                false,
-                &format!("The command failed.\n\n{}", stderr),
-            );
-        }
-        Err(err) => {
-            show_install_result(
-                parent,
-                failure_title,
-                false,
-                &format!("Failed to start the command: {}", err),
-            );
-        }
+    });
+}
+
+fn command_result(mut command: Command) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|err| format!("Failed to start the command: {err}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "The command failed.\n\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 
-fn rebuild_software_from_repo(parent: &ApplicationWindow, repo_dir: &Path) {
-    let Some(cargo_path) = cargo_binary() else {
-        show_install_result(
-            parent,
-            "Software Update Failed",
-            false,
-            "Could not find the cargo executable. Restart the session after installing Rust, or make sure ~/.cargo/bin is available to the app.",
-        );
-        return;
-    };
+fn rebuild_software_from_repo(repo_dir: &Path) -> Result<(), String> {
+    let cargo_path = cargo_binary().ok_or_else(|| {
+        "Could not find the cargo executable. Restart the session after installing Rust, or make sure ~/.cargo/bin is available to the app."
+            .to_string()
+    })?;
 
     let mut cargo_command = Command::new(cargo_path);
-    cargo_command.current_dir(repo_dir).args(["build", "--release"]);
-
-    match cargo_command.output() {
-        Ok(output) if output.status.success() => {
-            show_install_result(
-                parent,
-                "Software Updated",
-                true,
-                "The GUI repository was updated and rebuilt successfully. Restart the application to use the latest version.",
-            );
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            show_install_result(
-                parent,
-                "Software Update Failed",
-                false,
-                &format!("The rebuild command failed.\n\n{}", stderr),
-            );
-        }
-        Err(err) => {
-            show_install_result(
-                parent,
-                "Software Update Failed",
-                false,
-                &format!("Failed to start the rebuild command: {}", err),
-            );
-        }
-    }
+    cargo_command
+        .current_dir(repo_dir)
+        .args(["build", "--release"]);
+    command_result(cargo_command).map_err(|error| format!("The rebuild failed.\n\n{error}"))
 }
 
 fn update_software_from_github(parent: &ApplicationWindow, version_ref: Option<&str>) {
@@ -477,52 +525,55 @@ fn update_software_from_github(parent: &ApplicationWindow, version_ref: Option<&
             parent,
             gtk::MessageType::Warning,
             "Repository Not Found",
-            "I could not find the local Git checkout for this GUI. Please open the app from the cloned repository or set APP_DIR/HYPRGUI_REPO_DIR.",
+            "I could not find a verified local checkout of Better Hyprland GUI. Set APP_DIR/HYPRGUI_REPO_DIR to the correct checkout.",
         );
         return;
     };
 
-    let pinned_ref = version_ref.map(str::trim).filter(|value| !value.is_empty());
+    let pinned_ref = version_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
-    if let Some(version_ref) = pinned_ref {
-        match update_repo_checkout(&repo_dir) {
-            Ok(()) => match checkout_repo_ref(&repo_dir, version_ref) {
-                Ok(()) => {
-                    rebuild_software_from_repo(parent, &repo_dir);
-                }
-                Err(err) => {
-                    show_install_result(
-                        parent,
-                        "Software Update Failed",
-                        false,
-                        &err,
-                    );
-                }
-            },
-            Err(err) => {
-                show_install_result(
-                    parent,
-                    "Software Update Failed",
-                    false,
-                    &err,
-                );
+    run_background_task(
+        parent,
+        "Software Updated",
+        "The GUI repository was updated and rebuilt successfully. Restart the application to use the latest version.",
+        "Software Update Failed",
+        move || {
+            if let Some(version_ref) = pinned_ref {
+                ensure_repo_clean(&repo_dir)?;
+                fetch_repo(&repo_dir)?;
+                checkout_repo_ref(&repo_dir, &version_ref)?;
+            } else {
+                update_repo_checkout(&repo_dir)?;
             }
-        }
-        return;
-    }
+            rebuild_software_from_repo(&repo_dir)
+        },
+    );
+}
 
-    match update_repo_checkout(&repo_dir) {
-        Ok(()) => {
-            rebuild_software_from_repo(parent, &repo_dir);
-        }
-        Err(err) => {
-            show_install_result(
-                parent,
-                "Software Update Failed",
-                false,
-                &err,
-            );
-        }
+fn run_hyprland_command(
+    parent: &ApplicationWindow,
+    command: Command,
+    success_title: &str,
+    success_message: &str,
+    failure_title: &str,
+) {
+    run_background_task(
+        parent,
+        success_title,
+        success_message,
+        failure_title,
+        move || command_result(command),
+    );
+}
+
+fn nix_flake_ref_for_hyprland(version_ref: Option<&str>) -> String {
+    match version_ref.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if value.contains('#') => value.to_string(),
+        Some(value) => format!("{value}#hyprland"),
+        None => "nixpkgs#hyprland".to_string(),
     }
 }
 
@@ -546,7 +597,10 @@ fn install_hyprland_from_gui(parent: &ApplicationWindow, version_ref: Option<&st
         }
         "nixos" => {
             let mut command = Command::new("nix");
-            command.arg("profile").arg("install").arg(nix_flake_ref_for_hyprland(version_ref));
+            command
+                .arg("profile")
+                .arg("install")
+                .arg(nix_flake_ref_for_hyprland(version_ref));
             command
         }
         _ => {
@@ -685,6 +739,56 @@ fn normalize_repo_url(value: &str) -> String {
         .to_string()
 }
 
+fn normalize_git_remote_identity(value: &str) -> String {
+    let mut normalized = normalize_repo_url(value).replace('\\', "/");
+
+    if let Some(rest) = normalized.strip_prefix("git@") {
+        normalized = rest.replacen(':', "/", 1);
+    } else {
+        for prefix in ["https://", "http://", "ssh://", "git://"] {
+            if let Some(rest) = normalized.strip_prefix(prefix) {
+                normalized = rest.to_string();
+                break;
+            }
+        }
+        normalized = normalized.trim_start_matches("git@").to_string();
+    }
+
+    normalized
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
+fn verify_repo_remote(repo_dir: &Path, expected_url: &str) -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .map_err(|err| format!("Failed to inspect the repository origin: {err}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "The existing repository has no readable origin remote.\n\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let actual_url = String::from_utf8_lossy(&output.stdout);
+    let expected = normalize_git_remote_identity(expected_url);
+    let actual = normalize_git_remote_identity(&actual_url);
+    if expected.is_empty() || expected != actual {
+        return Err(format!(
+            "The install path belongs to a different repository.\n\nExpected: {expected_url}\nActual: {}",
+            actual_url.trim()
+        ));
+    }
+
+    Ok(())
+}
+
 fn expand_user_path(value: &str) -> PathBuf {
     let trimmed = value.trim();
 
@@ -716,7 +820,10 @@ fn file_profile_clone_command(profile: &FileProfile) -> String {
     if version_ref.is_empty() {
         format!("git clone {} {}", repo_url, install_path)
     } else {
-        format!("git clone --branch {} {} {}", version_ref, repo_url, install_path)
+        format!(
+            "git clone --branch {} {} {}",
+            version_ref, repo_url, install_path
+        )
     }
 }
 
@@ -741,174 +848,55 @@ fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
     };
 
     let target_path = PathBuf::from(&install_path);
-    if target_path.exists() {
-        if !target_path.join(".git").exists() {
-            let is_empty_dir = target_path.is_dir()
-                && fs::read_dir(&target_path)
-                    .ok()
-                    .map(|mut entries| entries.next().is_none())
-                    .unwrap_or(false);
+    let version_ref = profile.version_ref.trim().to_string();
 
-            if is_empty_dir {
-                let mut command = Command::new("git");
-                command.arg("clone");
-                if !profile.version_ref.trim().is_empty() {
-                    command.args(["--branch", profile.version_ref.trim()]);
-                }
-                command.arg(&repo_url).arg(&install_path);
-
-                run_hyprland_command(
-                    parent,
-                    command,
-                    "Dotfiles Installed",
-                    "The selected .file profile was installed successfully.",
-                    "Dotfiles Install Failed",
-                );
-                return;
-            }
-
+    if target_path.exists() && !target_path.join(".git").exists() {
+        let is_empty_dir = target_path.is_dir()
+            && fs::read_dir(&target_path)
+                .ok()
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+        if !is_empty_dir {
             show_message_dialog(
                 parent,
                 gtk::MessageType::Warning,
                 "Existing Folder",
-                "The install path already exists, but it is not a Git repository. Pick a different path or remove the folder first.",
+                "The install path already exists, but it is not an empty folder or Git repository. Pick a different path.",
             );
             return;
         }
+    }
 
-        let mut fetch_command = Command::new("git");
-        fetch_command
-            .arg("-C")
-            .arg(&target_path)
-            .args(["fetch", "--prune", "--tags", "origin"]);
+    if target_path.join(".git").exists() {
+        run_background_task(
+            parent,
+            "Dotfiles Updated",
+            "The selected .file profile was updated successfully.",
+            "Dotfiles Update Failed",
+            move || {
+                verify_repo_remote(&target_path, &repo_url)?;
+                ensure_repo_clean(&target_path)?;
+                fetch_repo(&target_path)?;
 
-        match fetch_command.output() {
-            Ok(fetch_output) if fetch_output.status.success() => {
-                if profile.version_ref.trim().is_empty() {
-                    match git_current_branch(&target_path) {
-                        Ok(Some(branch)) if branch != "HEAD" => {
-                            let mut command = Command::new("git");
-                            command.arg("-C").arg(&target_path).args(["pull", "--rebase"]);
-
-                            match command.output() {
-                                Ok(output) if output.status.success() => show_install_result(
-                                    parent,
-                                    "Dotfiles Updated",
-                                    true,
-                                    "The selected .file profile was updated successfully.",
-                                ),
-                                Ok(output) => {
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-                                    show_install_result(
-                                        parent,
-                                        "Dotfiles Update Failed",
-                                        false,
-                                        &format!("The git pull command failed.\n\n{}", stderr),
-                                    );
-                                }
-                                Err(err) => {
-                                    show_install_result(
-                                        parent,
-                                        "Dotfiles Update Failed",
-                                        false,
-                                        &format!("Failed to start the git pull command: {}", err),
-                                    );
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            let default_branch = match git_remote_default_branch(&target_path) {
-                                Ok(Some(branch)) => branch,
-                                Ok(None) => "main".to_string(),
-                                Err(err) => {
-                                    show_install_result(
-                                        parent,
-                                        "Dotfiles Update Failed",
-                                        false,
-                                        &err,
-                                    );
-                                    return;
-                                }
-                            };
-
-                            let reset_target = format!("origin/{default_branch}");
-                            let mut reset_command = Command::new("git");
-                            reset_command
-                                .arg("-C")
-                                .arg(&target_path)
-                                .args(["reset", "--hard", &reset_target]);
-
-                            match reset_command.output() {
-                                Ok(output) if output.status.success() => show_install_result(
-                                    parent,
-                                    "Dotfiles Updated",
-                                    true,
-                                    "The selected .file profile was updated successfully.",
-                                ),
-                                Ok(output) => {
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-                                    show_install_result(
-                                        parent,
-                                        "Dotfiles Update Failed",
-                                        false,
-                                        &format!("The git reset command failed.\n\n{}", stderr),
-                                    );
-                                }
-                                Err(err) => {
-                                    show_install_result(
-                                        parent,
-                                        "Dotfiles Update Failed",
-                                        false,
-                                        &format!("Failed to start the git reset command: {}", err),
-                                    );
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            show_install_result(
-                                parent,
-                                "Dotfiles Update Failed",
-                                false,
-                                &err,
-                            );
-                        }
-                    }
-                } else {
-                    match checkout_repo_ref(&target_path, profile.version_ref.trim()) {
-                        Ok(()) => show_install_result(
-                            parent,
-                            "Dotfiles Updated",
-                            true,
-                            "The selected .file profile was updated and switched to the requested version.",
-                        ),
-                        Err(err) => show_install_result(
-                            parent,
-                            "Dotfiles Update Failed",
-                            false,
-                            &err,
-                        ),
-                    }
+                if !version_ref.is_empty() {
+                    return checkout_repo_ref(&target_path, &version_ref);
                 }
-            }
-            Ok(fetch_output) => {
-                let stderr = String::from_utf8_lossy(&fetch_output.stderr);
-                show_install_result(
-                    parent,
-                    "Dotfiles Update Failed",
-                    false,
-                    &format!("The git fetch command failed.\n\n{}", stderr),
-                );
-            }
-            Err(err) => {
-                show_install_result(
-                    parent,
-                    "Dotfiles Update Failed",
-                    false,
-                    &format!("Failed to start the git fetch command: {}", err),
-                );
-            }
-        }
 
+                let branch = git_current_branch(&target_path)?
+                    .filter(|branch| branch != "HEAD")
+                    .ok_or_else(|| {
+                        "The repository is in detached-HEAD state. Select an explicit version ref before updating."
+                            .to_string()
+                    })?;
+                let remote_branch = format!("origin/{branch}");
+                let mut command = Command::new("git");
+                command
+                    .arg("-C")
+                    .arg(&target_path)
+                    .args(["merge", "--ff-only", &remote_branch]);
+                command_result(command)
+            },
+        );
         return;
     }
 
@@ -926,8 +914,17 @@ fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
 
     let mut command = Command::new("git");
     command.arg("clone");
-    if !profile.version_ref.trim().is_empty() {
-        command.args(["--branch", profile.version_ref.trim()]);
+    if !version_ref.is_empty() {
+        if let Err(error) = validate_version_ref(&version_ref) {
+            show_message_dialog(
+                parent,
+                gtk::MessageType::Warning,
+                "Invalid Version Ref",
+                &error,
+            );
+            return;
+        }
+        command.args(["--branch", &version_ref]);
     }
     command.arg(&repo_url).arg(&install_path);
 
@@ -1088,13 +1085,20 @@ fn open_spotlight_guide(parent: &ApplicationWindow) {
     let update_step = Rc::new(move || {
         let index = *current_index_back.borrow();
         let step = &steps_back[index];
-        step_label_back.set_markup(&format!("<span size=\"large\"><b>{}</b></span>", step.title));
+        step_label_back.set_markup(&format!(
+            "<span size=\"large\"><b>{}</b></span>",
+            step.title
+        ));
         target_label_back.set_markup(&format!("<b>Spotlight:</b> {}", step.target));
         body_label_back.set_text(step.body);
         tip_label_back.set_text(step.tip);
         back_button_back.set_sensitive(index > 0);
         next_button_back.set_sensitive(true);
-        next_button_back.set_label(if index + 1 < steps_back.len() { "Next" } else { "Finish" });
+        next_button_back.set_label(if index + 1 < steps_back.len() {
+            "Next"
+        } else {
+            "Finish"
+        });
     });
 
     let update_step_back = update_step.clone();
@@ -1126,6 +1130,8 @@ fn open_spotlight_guide(parent: &ApplicationWindow) {
     guide_window.present();
 }
 
+type RefreshCallback = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
 pub struct ConfigGUI {
     pub window: ApplicationWindow,
     config_widgets: HashMap<String, ConfigWidget>,
@@ -1133,7 +1139,7 @@ pub struct ConfigGUI {
     content_box: Box,
     changed_options: Rc<RefCell<HashMap<(String, String), String>>>,
     file_profiles: Rc<RefCell<FileProfileStore>>,
-    file_profiles_refresh: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    file_profiles_refresh: RefreshCallback,
     stack: Stack,
     sidebar: StackSidebar,
     load_config_button: Button,
@@ -1331,8 +1337,7 @@ impl ConfigGUI {
         description_label.set_halign(gtk::Align::Start);
         description_label.set_opacity(0.8);
 
-        let action_row = Box::new(Orientation::Horizontal, 10);
-        let add_profile_button = button_with_icon_label("list-add-symbolic", ".file hinzufügen");
+        let add_profile_button = button_with_icon_label("list-add-symbolic", "Add .file");
         let open_profile_button = Button::with_label("Open Selected Repo");
         let install_profile_button = Button::with_label("Install / Update Selected");
         let copy_command_button = Button::with_label("Copy Clone Command");
@@ -1462,13 +1467,13 @@ impl ConfigGUI {
                 list_box_for_refresh.append(&row);
             }
 
-            let selected_name = selected_name
-                .or_else(|| selected_name_for_refresh_clone.borrow().clone());
+            let selected_name =
+                selected_name.or_else(|| selected_name_for_refresh_clone.borrow().clone());
             let selected_index = selected_name.and_then(|wanted| {
                 profiles
                     .iter()
                     .position(|profile| profile.name == wanted)
-                    .or_else(|| if profiles.is_empty() { None } else { Some(0) })
+                    .or(if profiles.is_empty() { None } else { Some(0) })
             });
 
             if let Some(index) = selected_index {
@@ -1485,7 +1490,8 @@ impl ConfigGUI {
                 preview_path_for_refresh.set_text("Install path: -");
                 preview_version_for_refresh.set_text("Version: latest");
                 preview_command_for_refresh.set_text("Command: -");
-                preview_notes_for_refresh.set_text("Pick a profile to see its clone command and install target.");
+                preview_notes_for_refresh
+                    .set_text("Pick a profile to see its clone command and install target.");
             }
 
             let has_profile = !profiles.is_empty();
@@ -1652,7 +1658,11 @@ impl ConfigGUI {
 
             let store = store_for_open.borrow();
             if let Some(profile) = target.and_then(|wanted| {
-                store.profiles.iter().find(|profile| profile.name == wanted).cloned()
+                store
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.name == wanted)
+                    .cloned()
             }) {
                 open_uri(&parent, &profile.repo_url);
             }
@@ -1663,11 +1673,12 @@ impl ConfigGUI {
         let selected_name_for_copy = selected_name_for_refresh.clone();
         copy_command_button.connect_clicked(move |_| {
             let store = store_for_copy.borrow();
-            if let Some(profile) = selected_name_for_copy
-                .borrow()
-                .as_ref()
-                .and_then(|wanted| store.profiles.iter().find(|profile| &profile.name == wanted))
-            {
+            if let Some(profile) = selected_name_for_copy.borrow().as_ref().and_then(|wanted| {
+                store
+                    .profiles
+                    .iter()
+                    .find(|profile| &profile.name == wanted)
+            }) {
                 copy_text_to_clipboard(&file_profile_clone_command(profile));
                 show_message_dialog(
                     &parent,
@@ -1686,7 +1697,12 @@ impl ConfigGUI {
             if let Some(profile) = selected_name_for_install
                 .borrow()
                 .as_ref()
-                .and_then(|wanted| store.profiles.iter().find(|profile| &profile.name == wanted))
+                .and_then(|wanted| {
+                    store
+                        .profiles
+                        .iter()
+                        .find(|profile| &profile.name == wanted)
+                })
             {
                 install_file_profile(&parent, profile);
             }
@@ -2005,8 +2021,11 @@ impl ConfigGUI {
         container.append(&checklist_label);
 
         scrolled_window.set_child(Some(&container));
-        self.stack
-            .add_titled(&scrolled_window, Some("hyprland-install"), "Hyprland Install");
+        self.stack.add_titled(
+            &scrolled_window,
+            Some("hyprland-install"),
+            "Hyprland Install",
+        );
     }
 
     pub fn load_landing_pages(&mut self, note: &str) {
@@ -2187,6 +2206,7 @@ impl ConfigGUI {
 
     pub fn custom_info_popup(&mut self, title: &str, text: &str, modal: bool) {
         let dialog = MessageDialog::builder()
+            .transient_for(&self.window)
             .message_type(gtk::MessageType::Info)
             .buttons(gtk::ButtonsType::Ok)
             .title(title)
@@ -2203,6 +2223,7 @@ impl ConfigGUI {
 
     pub fn custom_error_popup(&mut self, title: &str, text: &str, modal: bool) {
         let dialog = MessageDialog::builder()
+            .transient_for(&self.window)
             .message_type(gtk::MessageType::Error)
             .buttons(gtk::ButtonsType::Ok)
             .title(title)
@@ -2219,6 +2240,7 @@ impl ConfigGUI {
 
     pub fn custom_error_popup_critical(&mut self, title: &str, text: &str, modal: bool) {
         let dialog = MessageDialog::builder()
+            .transient_for(&self.window)
             .message_type(gtk::MessageType::Error)
             .buttons(gtk::ButtonsType::Ok)
             .title(title)
@@ -4685,5 +4707,36 @@ impl ConfigWidget {
             }
         }
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_git_remote_identity, validate_version_ref};
+
+    #[test]
+    fn normalizes_common_github_remote_forms() {
+        let expected = "github.com/example/dotfiles";
+
+        assert_eq!(
+            normalize_git_remote_identity("https://github.com/example/dotfiles.git"),
+            expected
+        );
+        assert_eq!(
+            normalize_git_remote_identity("git@github.com:example/dotfiles.git"),
+            expected
+        );
+        assert_eq!(
+            normalize_git_remote_identity("[repo](https://github.com/example/dotfiles)"),
+            expected
+        );
+    }
+
+    #[test]
+    fn rejects_refs_that_can_be_parsed_as_options() {
+        assert!(validate_version_ref("--detach").is_err());
+        assert!(validate_version_ref("feature branch").is_err());
+        assert!(validate_version_ref("main").is_ok());
+        assert!(validate_version_ref("v0.1.4").is_ok());
     }
 }

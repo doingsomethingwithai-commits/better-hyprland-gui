@@ -21,7 +21,7 @@ find_repo_root() {
   local current_dir="$start_dir"
 
   while [[ -n "$current_dir" && "$current_dir" != "/" ]]; do
-    if [[ -d "$current_dir/.git" ]]; then
+    if [[ -e "$current_dir/.git" ]]; then
       printf '%s\n' "$current_dir"
       return 0
     fi
@@ -55,10 +55,20 @@ resolve_target_dir() {
 }
 
 install_rustup_if_missing() {
-  if ! have cargo; then
+  if have cargo; then
+    return 0
+  fi
+
+  if have rustup; then
+    log "Rustup found, installing the stable Rust toolchain."
+    rustup default stable
+  else
     log "Rust toolchain not found, installing rustup."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    # shellcheck disable=SC1090
+  fi
+
+  if [[ -r "$HOME/.cargo/env" ]]; then
+    # shellcheck disable=SC1090,SC1091
     source "$HOME/.cargo/env"
   fi
 }
@@ -69,13 +79,30 @@ checkout_version_ref() {
   local candidate
   local candidates=("$ref" "origin/$ref" "refs/tags/$ref")
 
+  if [[ -z "$ref" || "$ref" == -* || "$ref" =~ [[:space:][:cntrl:]] ]]; then
+    log "Refusing unsafe version ref: $ref"
+    return 1
+  fi
+
+  ensure_clean_checkout "$repo_dir"
+
   for candidate in "${candidates[@]}"; do
-    if git -C "$repo_dir" checkout --force "$candidate" >/dev/null 2>&1; then
+    if git -C "$repo_dir" checkout --detach "$candidate" >/dev/null 2>&1; then
       return 0
     fi
   done
 
-  git -C "$repo_dir" checkout --force "$ref"
+  git -C "$repo_dir" checkout --detach "$ref"
+}
+
+ensure_clean_checkout() {
+  local repo_dir="$1"
+
+  if [[ -n "$(git -C "$repo_dir" status --porcelain)" ]]; then
+    log "Refusing to update a checkout with local changes: $repo_dir"
+    log "Commit or stash the changes first."
+    return 1
+  fi
 }
 
 update_existing_checkout() {
@@ -88,28 +115,27 @@ update_existing_checkout() {
   fi
 
   local current_branch remote_branch
+  ensure_clean_checkout "$repo_dir"
   current_branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  if [[ -n "$current_branch" && "$current_branch" != "HEAD" ]]; then
-    remote_branch="origin/$current_branch"
-  else
-    remote_branch="origin/main"
+  if [[ -z "$current_branch" || "$current_branch" == "HEAD" ]]; then
+    log "Refusing automatic update from detached HEAD. Set APP_REF explicitly or switch to a branch."
+    return 1
   fi
+  remote_branch="origin/$current_branch"
 
   git -C "$repo_dir" fetch --prune --tags origin
-  if git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/${remote_branch}"; then
-    git -C "$repo_dir" reset --hard "$remote_branch"
-  elif git -C "$repo_dir" show-ref --verify --quiet refs/remotes/origin/main; then
-    git -C "$repo_dir" reset --hard origin/main
-  else
-    git -C "$repo_dir" reset --hard HEAD
+  if ! git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/${remote_branch}"; then
+    log "No matching remote branch found: $remote_branch"
+    return 1
   fi
+  git -C "$repo_dir" merge --ff-only "$remote_branch"
 }
 
 clone_or_update_repo() {
   local target_dir
   target_dir="$(resolve_target_dir)"
 
-  if [[ -d "$target_dir/.git" ]]; then
+  if [[ -e "$target_dir/.git" ]]; then
     log "Hard-updating existing checkout in $target_dir"
     update_existing_checkout "$target_dir"
   else
@@ -137,10 +163,7 @@ write_install_state() {
   target_dir="$(resolve_target_dir)"
 
   mkdir -p "$CONFIG_DIR"
-  cat > "$INSTALL_STATE_FILE" <<EOF
-APP_DIR=$target_dir
-HYPRGUI_REPO_DIR=$target_dir
-EOF
+  printf 'APP_DIR=%s\nHYPRGUI_REPO_DIR=%s\n' "$target_dir" "$target_dir" > "$INSTALL_STATE_FILE"
 }
 
 launch_app() {

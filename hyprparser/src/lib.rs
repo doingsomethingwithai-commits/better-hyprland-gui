@@ -41,7 +41,8 @@ impl HyprlandConfig {
             }
 
             let insert_at = find_insertion_index(&self.lines, start, end);
-            self.lines.insert(insert_at, format!("{}{} = {}", indent, key, value));
+            self.lines
+                .insert(insert_at, format!("{}{} = {}", indent, key, value));
             self.trailing_newline = true;
             return;
         }
@@ -75,7 +76,11 @@ fn parse_color_value(value: &str) -> Option<(f64, f64, f64, f64)> {
     let stripped = trimmed
         .strip_prefix("rgba(")
         .and_then(|rest| rest.strip_suffix(')'))
-        .or_else(|| trimmed.strip_prefix("rgb(").and_then(|rest| rest.strip_suffix(')')));
+        .or_else(|| {
+            trimmed
+                .strip_prefix("rgb(")
+                .and_then(|rest| rest.strip_suffix(')'))
+        });
 
     if let Some(body) = stripped {
         let hex = body.trim();
@@ -135,8 +140,8 @@ fn find_section_bounds(lines: &[String], section: &str) -> Option<(usize, usize,
                     + "    ";
                 let mut depth = 0usize;
 
-                for end in idx + 1..lines.len() {
-                    let candidate = lines[end].trim();
+                for (end, line) in lines.iter().enumerate().skip(idx + 1) {
+                    let candidate = line.trim();
                     if candidate.ends_with('{') {
                         depth += 1;
                     }
@@ -166,12 +171,7 @@ fn parse_section_name(line: &str) -> Option<&str> {
     Some(without_brace)
 }
 
-fn find_key_in_section(
-    lines: &[String],
-    start: usize,
-    end: usize,
-    key: &str,
-) -> Option<usize> {
+fn find_key_in_section(lines: &[String], start: usize, end: usize, key: &str) -> Option<usize> {
     for (idx, line) in lines[start..end].iter().enumerate() {
         let trimmed = line.trim_start();
         if trimmed.starts_with(&format!("{} =", key)) {
@@ -183,10 +183,68 @@ fn find_key_in_section(
 
 fn find_insertion_index(lines: &[String], start: usize, end: usize) -> usize {
     let mut insert_at = end;
-    for idx in start..end {
-        if !lines[idx].trim().is_empty() && lines[idx].trim() != "}" {
-            insert_at = idx + 1;
-        }
+    while insert_at > start && lines[insert_at - 1].trim().is_empty() {
+        insert_at -= 1;
     }
     insert_at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn updates_existing_key_without_dropping_other_content() {
+        let input = "general {\n    gaps_in = 5\n    # keep this comment\n    border_size = 2\n}\n";
+        let mut config = parse_config(input);
+
+        config.add_entry("general", "gaps_in = 10");
+
+        assert_eq!(
+            config.to_string(),
+            "general {\n    gaps_in = 10\n    # keep this comment\n    border_size = 2\n}\n"
+        );
+    }
+
+    #[test]
+    fn adds_missing_section_and_preserves_trailing_newline() {
+        let mut config = parse_config("monitor = preferred\n");
+
+        config.add_entry("decoration", "rounding = 8");
+
+        assert_eq!(
+            config.to_string(),
+            "monitor = preferred\ndecoration {\n    rounding = 8\n}\n"
+        );
+    }
+
+    #[test]
+    fn finds_the_end_of_a_section_with_nested_blocks() {
+        let input = "general {\n    layout = dwindle\n    nested {\n        enabled = true\n    }\n}\n\nmisc {\n    disable_hyprland_logo = true\n}\n";
+        let mut config = parse_config(input);
+
+        config.add_entry("general", "border_size = 3");
+
+        let output = config.to_string();
+        assert!(
+            output.contains("    }\n    border_size = 3\n}\n\nmisc"),
+            "unexpected parser output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn parses_supported_color_formats() {
+        let config = HyprlandConfig::new();
+
+        assert_eq!(
+            config.parse_color("rgb(FF0000)"),
+            Some((1.0, 0.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            config.parse_color("rgba(00FF0080)"),
+            Some((0.0, 1.0, 0.0, 128.0 / 255.0))
+        );
+        assert_eq!(config.parse_color("#0000FFFF"), Some((0.0, 0.0, 1.0, 1.0)));
+        assert_eq!(config.parse_color("not-a-color"), None);
+    }
 }

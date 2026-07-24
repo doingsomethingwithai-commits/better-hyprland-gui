@@ -8,7 +8,9 @@ const CONFIG_PATH: &str = ".config/hypr/hyprland.conf";
 const BACKUP_SUFFIX: &str = "-bak";
 
 fn main() {
-    let app = Application::builder().application_id("hyprgui").build();
+    let app = Application::builder()
+        .application_id("io.github.doingsomethingwithai.hyprgui")
+        .build();
 
     app.connect_activate(build_ui);
     app.run();
@@ -135,7 +137,10 @@ fn save_config_file(gui: Rc<RefCell<gui::ConfigGUI>>) {
         let updated_config_str = parsed_config.to_string();
 
         match fs::write(&path, updated_config_str) {
-            Ok(_) => println!("Configuration saved to: ~/{}", CONFIG_PATH),
+            Ok(_) => {
+                changes.borrow_mut().clear();
+                println!("Configuration saved to: ~/{}", CONFIG_PATH);
+            }
             Err(e) => {
                 gui_ref.custom_error_popup(
                     "Saving failed",
