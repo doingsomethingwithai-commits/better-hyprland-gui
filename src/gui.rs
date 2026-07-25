@@ -391,7 +391,7 @@ fn git_current_branch(repo_dir: &Path) -> Result<Option<String>, String> {
     }
 
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() {
+    if branch.is_empty() || branch == "HEAD" {
         Ok(None)
     } else {
         Ok(Some(branch))
@@ -480,11 +480,12 @@ fn fetch_repo(repo_dir: &Path) -> Result<(), String> {
     }
 }
 
-fn sync_software_repo_from_github(
+fn update_software_repo_from_github(
     repo_dir: &Path,
     version_ref: Option<&str>,
 ) -> Result<(), String> {
     ensure_git_repository(repo_dir)?;
+    ensure_repo_clean(repo_dir)?;
 
     let remote_update = git_command()
         .arg("-C")
@@ -501,21 +502,24 @@ fn sync_software_repo_from_github(
 
     fetch_repo(repo_dir)?;
 
-    let reset = git_command()
-        .arg("-C")
-        .arg(repo_dir)
-        .args(["reset", "--hard", "origin/main"])
-        .output()
-        .map_err(|error| format!("Failed to reset the local checkout to GitHub: {error}"))?;
-    if !reset.status.success() {
-        return Err(format!(
-            "Could not reset the local checkout to GitHub main.\n\n{}",
-            String::from_utf8_lossy(&reset.stderr)
-        ));
-    }
-
     if let Some(version_ref) = version_ref {
         checkout_repo_ref(repo_dir, version_ref)?;
+        return Ok(());
+    }
+
+    let branch = git_current_branch(repo_dir)?.unwrap_or_else(|| "main".to_string());
+    let remote_ref = format!("origin/{branch}");
+    let update = git_command()
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["merge", "--ff-only", &remote_ref])
+        .output()
+        .map_err(|error| format!("Failed to update the local checkout from GitHub: {error}"))?;
+    if !update.status.success() {
+        return Err(format!(
+            "Could not fast-forward the local checkout from GitHub.\n\n{}",
+            String::from_utf8_lossy(&update.stderr)
+        ));
     }
 
     Ok(())
@@ -740,7 +744,7 @@ fn restart_updated_application(parent: &ApplicationWindow, repo_dir: &Path) -> R
     Ok(())
 }
 
-fn hard_update_software_from_github(
+fn update_software_from_github(
     parent: &ApplicationWindow,
     button: &Button,
     version_ref: Option<&str>,
@@ -771,27 +775,8 @@ fn hard_update_software_from_github(
         }
     }
 
-    let script_path = repo_dir.join("scripts").join("hard-update.sh");
-    if !script_path.is_file() {
-        show_message_dialog(
-            parent,
-            gtk::MessageType::Error,
-            "Hard Update Unavailable",
-            &format!("The hard-update script was not found at {}.", script_path.display()),
-        );
-        return;
-    }
-
-    let app_dir = repo_dir.to_string_lossy().into_owned();
-    let mut command = Command::new("bash");
-    command
-        .arg(&script_path)
-        .env("APP_DIR", &app_dir)
-        .env("NO_LAUNCH", "1");
-    if let Some(version_ref) = pinned_ref {
-        command.env("APP_REF", version_ref);
-    }
-
+    let update_repo_dir = repo_dir.clone();
+    let update_ref = pinned_ref.clone();
     let restart_repo_dir = repo_dir.clone();
     let restart_parent = parent.clone();
     let restart_action: std::boxed::Box<dyn FnOnce() + 'static> = std::boxed::Box::new(move || {
@@ -808,112 +793,16 @@ fn hard_update_software_from_github(
     run_background_task_with_completion(
         parent,
         Some(button),
-        "Updating software…",
-        "Hard Update Complete",
-        "The new version was built. Restarting the application now…",
-        "Hard Update Failed",
+        "Updating software...",
+        "Software Update Complete",
+        "The new version was built. Restarting the application now...",
+        "Software Update Failed",
         Some(restart_action),
-        move || command_result(command),
+        move || {
+            update_software_repo_from_github(&update_repo_dir, update_ref.as_deref())?;
+            rebuild_software_from_repo(&update_repo_dir)
+        },
     );
-}
-
-fn hard_delete_software_from_github(parent: &ApplicationWindow, button: &Button) {
-    let Some(repo_dir) = software_repo_dir() else {
-        show_message_dialog(
-            parent,
-            gtk::MessageType::Warning,
-            "Repository Not Found",
-            "I could not find a verified local checkout of Better Hyprland GUI.",
-        );
-        return;
-    };
-
-    let script_path = repo_dir.join("scripts").join("hard-delete.sh");
-    if !script_path.is_file() {
-        show_message_dialog(
-            parent,
-            gtk::MessageType::Error,
-            "Hard Delete Unavailable",
-            &format!("The hard-delete script was not found at {}.", script_path.display()),
-        );
-        return;
-    }
-
-    let app_dir = repo_dir.to_string_lossy().into_owned();
-    let mut command = Command::new("bash");
-    command.arg(&script_path).env("APP_DIR", &app_dir);
-    run_background_task(
-        parent,
-        Some(button),
-        "Deleting checkout...",
-        "Hard Delete Complete",
-        "The application checkout was deleted. Close this window and reinstall when needed.",
-        "Hard Delete Failed",
-        move || command_result(command),
-    );
-}
-
-fn confirm_hard_update(
-    parent: &ApplicationWindow,
-    button: &Button,
-    version_ref: Option<String>,
-) {
-    let dialog = MessageDialog::builder()
-        .transient_for(parent)
-        .message_type(gtk::MessageType::Warning)
-        .buttons(gtk::ButtonsType::YesNo)
-        .title("Confirm Hard Update")
-        .text("Hard Update deletes the local application checkout, clones it again from GitHub, rebuilds it, and restarts the GUI. Local changes in that checkout will be lost. Continue?")
-        .modal(true)
-        .build();
-
-    let parent_for_action = parent.clone();
-    let button_for_action = button.clone();
-    dialog.connect_response(move |dialog, response| {
-        dialog.close();
-        if response == gtk::ResponseType::Yes {
-            hard_update_software_from_github(
-                &parent_for_action,
-                &button_for_action,
-                version_ref.as_deref(),
-            );
-        }
-    });
-    dialog.show();
-}
-
-fn confirm_hard_delete(parent: &ApplicationWindow, button: &Button) {
-    let Some(repo_dir) = software_repo_dir() else {
-        show_message_dialog(
-            parent,
-            gtk::MessageType::Warning,
-            "Repository Not Found",
-            "I could not find a verified local checkout of Better Hyprland GUI.",
-        );
-        return;
-    };
-
-    let dialog = MessageDialog::builder()
-        .transient_for(parent)
-        .message_type(gtk::MessageType::Warning)
-        .buttons(gtk::ButtonsType::YesNo)
-        .title("Confirm Hard Delete")
-        .text(&format!(
-            "This permanently deletes the Better Hyprland GUI checkout at {} and its launcher state. Your Hyprland and dotfiles configuration will not be deleted. Continue?",
-            repo_dir.display()
-        ))
-        .modal(true)
-        .build();
-
-    let parent_for_action = parent.clone();
-    let button_for_action = button.clone();
-    dialog.connect_response(move |dialog, response| {
-        dialog.close();
-        if response == gtk::ResponseType::Yes {
-            hard_delete_software_from_github(&parent_for_action, &button_for_action);
-        }
-    });
-    dialog.show();
 }
 
 fn run_hyprland_command(
@@ -3290,7 +3179,7 @@ impl ConfigGUI {
         software_version_entry.set_placeholder_text(Some("Optional: branch, tag, or commit SHA"));
 
         let version_help_label = Label::new(Some(
-            "Examples: `main`, `v0.1.0`, `dc92648`, or `github:NixOS/nixpkgs/<ref>` on NixOS. Hard Update replaces the local GUI checkout from GitHub.",
+            "Examples: `main`, `v0.1.0`, `dc92648`, or `github:NixOS/nixpkgs/<ref>` on NixOS. Software Update fetches and fast-forwards the local GUI checkout from GitHub.",
         ));
         version_help_label.set_wrap(true);
         version_help_label.set_halign(gtk::Align::Start);
@@ -3298,8 +3187,7 @@ impl ConfigGUI {
 
         let install_hyprland_button = Button::with_label("Install Hyprland");
         let update_hyprland_button = Button::with_label("Update Hyprland");
-        let hard_update_button = Button::with_label("Hard Update");
-        let hard_delete_button = Button::with_label("Hard Delete");
+        let update_software_button = Button::with_label("Update Software");
 
         let parent = self.window.clone();
         let hyprland_version_for_install = hyprland_version_entry.clone();
@@ -3317,29 +3205,22 @@ impl ConfigGUI {
 
         let parent = self.window.clone();
         let software_version_for_update = software_version_entry.clone();
-        hard_update_button.connect_clicked(move |button| {
+        update_software_button.connect_clicked(move |button| {
             let version_ref = entry_text_or_none(&software_version_for_update);
-            confirm_hard_update(&parent, button, version_ref);
-        });
-
-        let parent = self.window.clone();
-        hard_delete_button.connect_clicked(move |button| {
-            confirm_hard_delete(&parent, button);
+            update_software_from_github(&parent, button, version_ref.as_deref());
         });
 
         let button_row = Box::new(Orientation::Vertical, 10);
         button_row.set_hexpand(true);
         install_hyprland_button.set_hexpand(true);
         update_hyprland_button.set_hexpand(true);
-        hard_update_button.set_hexpand(true);
-        hard_delete_button.set_hexpand(true);
+        update_software_button.set_hexpand(true);
         button_row.append(&install_hyprland_button);
         button_row.append(&update_hyprland_button);
-        button_row.append(&hard_update_button);
-        button_row.append(&hard_delete_button);
+        button_row.append(&update_software_button);
 
         let checklist_label = Label::new(Some(
-            "Recommended path: use Hard Update to replace and rebuild the GUI checkout. Hard Delete removes only the GUI installation; it does not remove Hyprland or dotfiles.",
+            "Software Update keeps the existing checkout and updates it with a fast-forward from GitHub. Hard recovery commands are intentionally available only in the terminal.",
         ));
         checklist_label.set_wrap(true);
         checklist_label.set_halign(gtk::Align::Start);
