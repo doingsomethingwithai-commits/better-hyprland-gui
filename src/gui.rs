@@ -1,6 +1,6 @@
 use gtk::{
     gdk, gio, glib, prelude::*, Application, ApplicationWindow, Box, Button, ColorButton, DropDown,
-    Entry, Frame, HeaderBar, Image, Label, ListBox, ListBoxRow, MessageDialog, Orientation,
+    Entry, Frame, Grid, HeaderBar, Image, Label, MessageDialog, Orientation,
     Popover, ScrolledWindow, Separator, SpinButton, Stack, StackSidebar, StringList, Switch,
     Widget,
 };
@@ -122,6 +122,16 @@ fn open_uri(parent: &ApplicationWindow, uri: &str) {
             gtk::MessageType::Warning,
             "Missing Link",
             "Please paste a GitHub link first.",
+        );
+        return;
+    }
+
+    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
+        show_message_dialog(
+            parent,
+            gtk::MessageType::Warning,
+            "Unsupported Link",
+            "Only HTTP and HTTPS links can be opened from the GUI.",
         );
         return;
     }
@@ -842,26 +852,79 @@ fn expand_user_path(value: &str) -> PathBuf {
     PathBuf::from(trimmed)
 }
 
-fn file_profile_clone_command(profile: &FileProfile) -> String {
-    let install_path = if profile.install_path.trim().is_empty() {
-        default_file_install_path()
+fn file_profile_install_path(profile: &FileProfile) -> PathBuf {
+    if profile.install_path.trim().is_empty() {
+        expand_user_path(&default_file_install_path())
     } else {
         expand_user_path(profile.install_path.trim())
-            .to_string_lossy()
-            .to_string()
-    };
-
-    let repo_url = normalize_repo_url(&profile.repo_url);
-    let version_ref = profile.version_ref.trim();
-
-    if version_ref.is_empty() {
-        format!("git clone {} {}", repo_url, install_path)
-    } else {
-        format!(
-            "git clone --branch {} {} {}",
-            version_ref, repo_url, install_path
-        )
     }
+}
+
+fn file_profile_is_installed(profile: &FileProfile) -> bool {
+    file_profile_install_path(profile).join(".git").is_dir()
+}
+
+fn file_profile_status(profile: &FileProfile) -> &'static str {
+    if file_profile_is_installed(profile) {
+        "Installed"
+    } else {
+        "Not installed"
+    }
+}
+
+fn file_profile_preview(profile: &FileProfile) -> String {
+    let root = file_profile_install_path(profile);
+    let candidates = [
+        root.join(".config").join("hypr").join("hyprland.conf"),
+        root.join("hyprland.conf"),
+        root.join("README.md"),
+        root.join("README"),
+    ];
+
+    for candidate in candidates {
+        if let Ok(content) = fs::read_to_string(candidate) {
+            let preview = content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .take(12)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !preview.is_empty() {
+                return preview;
+            }
+        }
+    }
+
+    if root.is_dir() {
+        let mut entries = fs::read_dir(root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .take(10)
+            .collect::<Vec<_>>();
+        entries.sort();
+        if !entries.is_empty() {
+            return entries
+                .into_iter()
+                .map(|entry| format!("./{entry}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+    }
+
+    "Install this profile to preview its files here.".to_string()
+}
+
+fn file_profile_name_from_url(url: &str) -> String {
+    normalize_repo_url(url)
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("Dotfiles")
+        .trim_end_matches(".git")
+        .to_string()
 }
 
 fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &FileProfile) {
@@ -876,13 +939,9 @@ fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &F
         return;
     }
 
-    let install_path = if profile.install_path.trim().is_empty() {
-        default_file_install_path()
-    } else {
-        expand_user_path(profile.install_path.trim())
-            .to_string_lossy()
-            .to_string()
-    };
+    let install_path = file_profile_install_path(profile)
+        .to_string_lossy()
+        .to_string();
 
     let target_path = PathBuf::from(&install_path);
     let version_ref = profile.version_ref.trim().to_string();
@@ -976,12 +1035,6 @@ fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &F
         "The selected .file profile was installed successfully.",
         "Dotfiles Install Failed",
     );
-}
-
-fn clear_listbox(list_box: &ListBox) {
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
 }
 
 fn button_with_icon_label(icon_name: &str, text: &str) -> Button {
@@ -1192,8 +1245,8 @@ impl ConfigGUI {
     pub fn new(app: &Application) -> Self {
         let window = ApplicationWindow::builder()
             .application(app)
-            .default_width(1000)
-            .default_height(600)
+            .default_width(1280)
+            .default_height(760)
             .build();
 
         let header_bar = HeaderBar::builder()
@@ -1347,9 +1400,17 @@ impl ConfigGUI {
         help_label.set_opacity(0.8);
         help_label.set_halign(gtk::Align::Start);
 
+        let origin_label = Label::new(Some(
+            "Personal rework of the original HyprGUI project by MarkusVolk: https://github.com/MarkusVolk/hyprgui",
+        ));
+        origin_label.set_wrap(true);
+        origin_label.set_opacity(0.72);
+        origin_label.set_halign(gtk::Align::Start);
+
         container.append(&title_label);
         container.append(&note_label);
         container.append(&help_label);
+        container.append(&origin_label);
 
         scrolled_window.set_child(Some(&container));
         self.stack
@@ -1361,269 +1422,407 @@ impl ConfigGUI {
         scrolled_window.set_vexpand(true);
         scrolled_window.set_hexpand(true);
 
-        let container = Box::new(Orientation::Vertical, 14);
+        let container = Box::new(Orientation::Vertical, 12);
         container.set_margin_top(16);
         container.set_margin_bottom(16);
         container.set_margin_start(16);
         container.set_margin_end(16);
 
-        let title_label = Label::new(Some(".files Library"));
-        title_label.set_markup("<b>.files Library</b>");
+        let header_row = Box::new(Orientation::Horizontal, 10);
+        let title_box = Box::new(Orientation::Vertical, 3);
+        let title_label = Label::new(Some(".files"));
+        title_label.set_markup("<b>.files</b>");
         title_label.set_halign(gtk::Align::Start);
-
         let description_label = Label::new(Some(
-            "Select a saved .file profile on the left to preview it on the right. Use the plus button to add GitHub repos or local install targets.",
+            "Browse, preview, and install dotfiles from Git repositories in one workspace.",
         ));
-        description_label.set_wrap(true);
         description_label.set_halign(gtk::Align::Start);
-        description_label.set_opacity(0.8);
+        description_label.set_opacity(0.75);
+        title_box.append(&title_label);
+        title_box.append(&description_label);
 
         let add_profile_button = button_with_icon_label("list-add-symbolic", "Add .file");
-        let open_profile_button = Button::with_label("Open Selected Repo");
-        let run_command_button = Button::with_label("Run Clone / Update");
-        let remove_profile_button = Button::with_label("Remove Selected");
+        add_profile_button.set_tooltip_text(Some("Save a repository as a reusable .file profile"));
+        let refresh_button = Button::from_icon_name("view-refresh-symbolic");
+        refresh_button.set_tooltip_text(Some("Reload saved profiles and installed status"));
+        header_row.append(&title_box);
+        let header_spacer = Box::new(Orientation::Horizontal, 0);
+        header_spacer.set_hexpand(true);
+        header_row.append(&header_spacer);
+        header_row.append(&add_profile_button);
+        header_row.append(&refresh_button);
 
-        let body_row = Box::new(Orientation::Horizontal, 14);
+        let search_row = Box::new(Orientation::Horizontal, 8);
+        let search_entry = Entry::new();
+        search_entry.set_hexpand(true);
+        search_entry.set_placeholder_text(Some("Search .files by name or repository"));
+        search_entry.set_icon_from_icon_name(gtk::EntryIconPosition::Primary, Some("system-search-symbolic"));
+        let clear_search_button = Button::from_icon_name("edit-clear-symbolic");
+        clear_search_button.set_tooltip_text(Some("Clear search"));
+        let sort_model = gtk::StringList::new(&["Selected first", "Name", "Repository"]);
+        let sort_dropdown = DropDown::new(Some(sort_model), None::<gtk::Expression>);
+        sort_dropdown.set_selected(0);
+        sort_dropdown.set_tooltip_text(Some("Change profile order"));
+        search_row.append(&search_entry);
+        search_row.append(&clear_search_button);
+        search_row.append(&sort_dropdown);
+
+        let filter_row = Box::new(Orientation::Horizontal, 6);
+        let filter_label = Label::new(Some("Show:"));
+        filter_label.set_opacity(0.75);
+        let all_filter_button = Button::with_label("All");
+        let installed_filter_button = Button::with_label("Installed");
+        let missing_filter_button = Button::with_label("Not installed");
+        filter_row.append(&filter_label);
+        filter_row.append(&all_filter_button);
+        filter_row.append(&installed_filter_button);
+        filter_row.append(&missing_filter_button);
+
+        let body_row = Box::new(Orientation::Horizontal, 12);
         body_row.set_hexpand(true);
         body_row.set_vexpand(true);
 
-        let list_frame = Frame::new(Some("Saved .files"));
-        let list_scroller = ScrolledWindow::new();
-        list_scroller.set_vexpand(true);
-        list_scroller.set_hexpand(false);
-        list_scroller.set_min_content_width(300);
+        let gallery_frame = Frame::new(Some("Dotfile profiles"));
+        gallery_frame.set_hexpand(true);
+        let gallery_scroller = ScrolledWindow::new();
+        gallery_scroller.set_vexpand(true);
+        gallery_scroller.set_hexpand(true);
+        let gallery_grid = Grid::new();
+        gallery_grid.set_column_spacing(10);
+        gallery_grid.set_row_spacing(10);
+        gallery_grid.set_margin_top(10);
+        gallery_grid.set_margin_bottom(10);
+        gallery_grid.set_margin_start(10);
+        gallery_grid.set_margin_end(10);
+        gallery_scroller.set_child(Some(&gallery_grid));
+        gallery_frame.set_child(Some(&gallery_scroller));
 
-        let list_box = ListBox::new();
-        list_box.set_vexpand(true);
-        list_box.set_selection_mode(gtk::SelectionMode::Single);
-        list_scroller.set_child(Some(&list_box));
-        list_frame.set_child(Some(&list_scroller));
+        let detail_frame = Frame::new(Some("Profile details"));
+        detail_frame.set_size_request(330, -1);
+        let detail_box = Box::new(Orientation::Vertical, 9);
+        detail_box.set_margin_top(12);
+        detail_box.set_margin_bottom(12);
+        detail_box.set_margin_start(12);
+        detail_box.set_margin_end(12);
 
-        let preview_frame = Frame::new(Some("Preview"));
-        let preview_box = Box::new(Orientation::Vertical, 10);
-        preview_box.set_margin_top(14);
-        preview_box.set_margin_bottom(14);
-        preview_box.set_margin_start(14);
-        preview_box.set_margin_end(14);
-
+        let preview_heading = Label::new(Some("Preview"));
+        preview_heading.set_halign(gtk::Align::Start);
+        preview_heading.set_opacity(0.75);
         let preview_title = Label::new(Some("No .file selected"));
         preview_title.set_markup("<b>No .file selected</b>");
         preview_title.set_halign(gtk::Align::Start);
+        let preview_label = Label::new(Some("Select a profile to inspect its files and install target."));
+        preview_label.set_halign(gtk::Align::Start);
+        preview_label.set_wrap(true);
+        preview_label.set_selectable(true);
+        preview_label.set_xalign(0.0);
+        preview_label.set_yalign(0.0);
+        preview_label.set_size_request(-1, 170);
 
-        let preview_repo = Label::new(Some("Repo: -"));
-        preview_repo.set_halign(gtk::Align::Start);
-        preview_repo.set_wrap(true);
+        let status_label = Label::new(Some("Status: -"));
+        status_label.set_halign(gtk::Align::Start);
+        let repo_label = Label::new(Some("Repository: -"));
+        repo_label.set_halign(gtk::Align::Start);
+        repo_label.set_wrap(true);
+        repo_label.set_selectable(true);
+        let path_label = Label::new(Some("Install path: -"));
+        path_label.set_halign(gtk::Align::Start);
+        path_label.set_wrap(true);
+        let version_label = Label::new(Some("Branch / ref: latest"));
+        version_label.set_halign(gtk::Align::Start);
+        version_label.set_wrap(true);
+        let notes_label = Label::new(Some("Notes: -"));
+        notes_label.set_halign(gtk::Align::Start);
+        notes_label.set_wrap(true);
+        notes_label.set_opacity(0.8);
 
-        let preview_path = Label::new(Some("Install path: -"));
-        preview_path.set_halign(gtk::Align::Start);
-        preview_path.set_wrap(true);
+        let open_profile_button = Button::with_label("Open repository");
+        open_profile_button.set_tooltip_text(Some("Open the selected repository in the default browser"));
+        let run_command_button = Button::with_label("Install / Update");
+        run_command_button.set_tooltip_text(Some("Clone a new profile or fast-forward an installed profile"));
+        run_command_button.add_css_class("suggested-action");
+        let remove_profile_button = Button::with_label("Remove from library");
+        remove_profile_button.set_tooltip_text(Some("Remove the saved profile without deleting its files"));
 
-        let preview_version = Label::new(Some("Version: latest"));
-        preview_version.set_halign(gtk::Align::Start);
-        preview_version.set_wrap(true);
+        detail_box.append(&preview_heading);
+        detail_box.append(&preview_title);
+        detail_box.append(&preview_label);
+        detail_box.append(&Separator::new(Orientation::Horizontal));
+        detail_box.append(&status_label);
+        detail_box.append(&repo_label);
+        detail_box.append(&path_label);
+        detail_box.append(&version_label);
+        detail_box.append(&notes_label);
+        detail_box.append(&Separator::new(Orientation::Horizontal));
+        detail_box.append(&open_profile_button);
+        detail_box.append(&run_command_button);
+        detail_box.append(&remove_profile_button);
+        detail_frame.set_child(Some(&detail_box));
 
-        let preview_command = Label::new(Some("Command: -"));
-        preview_command.set_halign(gtk::Align::Start);
-        preview_command.set_wrap(true);
-        preview_command.set_selectable(true);
+        body_row.append(&gallery_frame);
+        body_row.append(&detail_frame);
 
-        let preview_notes = Label::new(Some(
-            "Pick a profile to see its clone command and install target.",
-        ));
-        preview_notes.set_halign(gtk::Align::Start);
-        preview_notes.set_wrap(true);
-        preview_notes.set_opacity(0.8);
+        let quick_install_frame = Frame::new(Some("Install another repository"));
+        let quick_install_box = Box::new(Orientation::Vertical, 8);
+        quick_install_box.set_margin_top(10);
+        quick_install_box.set_margin_bottom(10);
+        quick_install_box.set_margin_start(10);
+        quick_install_box.set_margin_end(10);
+        let quick_repo_entry = Entry::new();
+        quick_repo_entry.set_placeholder_text(Some("https://github.com/username/dotfiles"));
+        let quick_path_entry = Entry::new();
+        quick_path_entry.set_placeholder_text(Some(&default_file_install_path()));
+        let quick_ref_entry = Entry::new();
+        quick_ref_entry.set_placeholder_text(Some("Optional branch, tag, or commit"));
+        let quick_install_button = Button::with_label("Install repository");
+        quick_install_button.add_css_class("suggested-action");
+        quick_install_box.append(&quick_repo_entry);
+        quick_install_box.append(&quick_path_entry);
+        quick_install_box.append(&quick_ref_entry);
+        quick_install_box.append(&quick_install_button);
+        quick_install_frame.set_child(Some(&quick_install_box));
 
-        preview_box.append(&preview_title);
-        preview_box.append(&preview_repo);
-        preview_box.append(&preview_path);
-        preview_box.append(&preview_version);
-        preview_box.append(&preview_command);
-        preview_box.append(&preview_notes);
-        preview_frame.set_child(Some(&preview_box));
+        let store = self.file_profiles.clone();
+        let initial_selected = store.borrow().selected.clone();
+        let selected_name = Rc::new(RefCell::new(initial_selected));
+        let filter_mode = Rc::new(RefCell::new("all".to_string()));
+        let sort_mode = Rc::new(RefCell::new("recent".to_string()));
 
-        body_row.append(&list_frame);
-        body_row.append(&preview_frame);
-
-        let hint_label = Label::new(Some(
-            "Wolkup-style flow: choose a profile, inspect the preview, then install or switch to another profile with one click.",
-        ));
-        hint_label.set_wrap(true);
-        hint_label.set_halign(gtk::Align::Start);
-        hint_label.set_opacity(0.75);
-
-        let store_for_refresh = self.file_profiles.clone();
-        let list_box_for_refresh = list_box.clone();
-        let preview_title_for_refresh = preview_title.clone();
-        let preview_repo_for_refresh = preview_repo.clone();
-        let preview_path_for_refresh = preview_path.clone();
-        let preview_version_for_refresh = preview_version.clone();
-        let preview_command_for_refresh = preview_command.clone();
-        let preview_notes_for_refresh = preview_notes.clone();
-        let open_profile_button_for_refresh = open_profile_button.clone();
-        let run_command_button_for_refresh = run_command_button.clone();
-        let remove_profile_button_for_refresh = remove_profile_button.clone();
-        let initial_selected_name = self.file_profiles.borrow().selected.clone();
-        let selected_name_for_refresh = Rc::new(RefCell::new(initial_selected_name));
-        let selected_name_for_refresh_clone = selected_name_for_refresh.clone();
-
-        let refresh_ui: Rc<dyn Fn()> = Rc::new(move || {
-            let (profiles, selected_name) = {
-                let store = store_for_refresh.borrow();
-                (store.profiles.clone(), store.selected.clone())
-            };
-
-            clear_listbox(&list_box_for_refresh);
-
-            for profile in &profiles {
-                let row = ListBoxRow::new();
-                row.set_activatable(true);
-
-                let row_box = Box::new(Orientation::Vertical, 3);
-                row_box.set_margin_top(10);
-                row_box.set_margin_bottom(10);
-                row_box.set_margin_start(10);
-                row_box.set_margin_end(10);
+        let update_detail: Rc<dyn Fn(Option<FileProfile>)> = {
+            let preview_title = preview_title.clone();
+            let preview_label = preview_label.clone();
+            let status_label = status_label.clone();
+            let repo_label = repo_label.clone();
+            let path_label = path_label.clone();
+            let version_label = version_label.clone();
+            let notes_label = notes_label.clone();
+            let open_profile_button = open_profile_button.clone();
+            let run_command_button = run_command_button.clone();
+            let remove_profile_button = remove_profile_button.clone();
+            Rc::new(move |profile| {
+                let Some(profile) = profile else {
+                    preview_title.set_markup("<b>No .file selected</b>");
+                    preview_label.set_text("Select a profile to inspect its files and install target.");
+                    status_label.set_text("Status: -");
+                    repo_label.set_text("Repository: -");
+                    path_label.set_text("Install path: -");
+                    version_label.set_text("Branch / ref: latest");
+                    notes_label.set_text("Notes: -");
+                    open_profile_button.set_sensitive(false);
+                    run_command_button.set_sensitive(false);
+                    remove_profile_button.set_sensitive(false);
+                    return;
+                };
 
                 let escaped_name = glib::markup_escape_text(&profile.name);
-                let name_label = Label::new(Some(&profile.name));
-                name_label.set_halign(gtk::Align::Start);
-                name_label.set_markup(&format!("<b>{}</b>", escaped_name));
-
-                let path_value = if profile.install_path.trim().is_empty() {
-                    default_file_install_path()
+                preview_title.set_markup(&format!("<b>{}</b>", escaped_name));
+                preview_label.set_text(&file_profile_preview(&profile));
+                status_label.set_text(&format!("Status: {}", file_profile_status(&profile)));
+                repo_label.set_text(&format!("Repository: {}", profile.repo_url));
+                path_label.set_text(&format!(
+                    "Install path: {}",
+                    file_profile_install_path(&profile).to_string_lossy()
+                ));
+                let version_text = if profile.version_ref.trim().is_empty() {
+                    "Branch / ref: latest".to_string()
                 } else {
-                    profile.install_path.clone()
+                    format!("Branch / ref: {}", profile.version_ref)
                 };
-                let path_label = Label::new(Some(&path_value));
-                path_label.set_halign(gtk::Align::Start);
-                path_label.set_wrap(true);
-                path_label.set_opacity(0.75);
+                version_label.set_text(&version_text);
+                let notes_text = if profile.notes.trim().is_empty() {
+                    "Notes: No extra notes saved.".to_string()
+                } else {
+                    format!("Notes: {}", profile.notes)
+                };
+                notes_label.set_text(&notes_text);
+                open_profile_button.set_sensitive(true);
+                run_command_button.set_sensitive(true);
+                remove_profile_button.set_sensitive(true);
+                run_command_button.set_label(if file_profile_is_installed(&profile) {
+                    "Update profile"
+                } else {
+                    "Install profile"
+                });
+            })
+        };
 
-                row_box.append(&name_label);
-                row_box.append(&path_label);
-                row.set_child(Some(&row_box));
-                list_box_for_refresh.append(&row);
-            }
-
-            let selected_name =
-                selected_name.or_else(|| selected_name_for_refresh_clone.borrow().clone());
-            let selected_index = selected_name.and_then(|wanted| {
-                profiles
-                    .iter()
-                    .position(|profile| profile.name == wanted)
-                    .or(if profiles.is_empty() { None } else { Some(0) })
-            });
-
-            if let Some(index) = selected_index {
-                if let Some(row) = list_box_for_refresh.row_at_index(index as i32) {
-                    list_box_for_refresh.select_row(Some(&row));
+        let refresh_holder: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        let refresh_ui: Rc<dyn Fn()> = {
+            let store = store.clone();
+            let selected_name = selected_name.clone();
+            let filter_mode = filter_mode.clone();
+            let sort_mode = sort_mode.clone();
+            let search_entry = search_entry.clone();
+            let gallery_grid = gallery_grid.clone();
+            let update_detail = update_detail.clone();
+            Rc::new(move || {
+                *store.borrow_mut() = load_file_profile_store();
+                while let Some(child) = gallery_grid.first_child() {
+                    gallery_grid.remove(&child);
                 }
-            } else if !profiles.is_empty() {
-                if let Some(row) = list_box_for_refresh.row_at_index(0) {
-                    list_box_for_refresh.select_row(Some(&row));
+
+                let query = search_entry.text().trim().to_lowercase();
+                let filter = filter_mode.borrow().clone();
+                let mut profiles = store.borrow().profiles.clone();
+                profiles.retain(|profile| {
+                    let matches_query = query.is_empty()
+                        || profile.name.to_lowercase().contains(&query)
+                        || profile.repo_url.to_lowercase().contains(&query);
+                    let matches_filter = match filter.as_str() {
+                        "installed" => file_profile_is_installed(profile),
+                        "missing" => !file_profile_is_installed(profile),
+                        _ => true,
+                    };
+                    matches_query && matches_filter
+                });
+
+                match sort_mode.borrow().as_str() {
+                    "name" => profiles.sort_by_key(|profile| profile.name.to_lowercase()),
+                    "repo" => profiles.sort_by_key(|profile| profile.repo_url.to_lowercase()),
+                    _ => profiles.sort_by_key(|profile| {
+                        if Some(profile.name.clone()) == *selected_name.borrow() {
+                            0
+                        } else {
+                            1
+                        }
+                    }),
                 }
-            } else {
-                preview_title_for_refresh.set_markup("<b>No .file selected</b>");
-                preview_repo_for_refresh.set_text("Repo: -");
-                preview_path_for_refresh.set_text("Install path: -");
-                preview_version_for_refresh.set_text("Version: latest");
-                preview_command_for_refresh.set_text("Command: -");
-                preview_notes_for_refresh
-                    .set_text("Pick a profile to see its clone command and install target.");
-            }
 
-            let has_profile = !profiles.is_empty();
-            open_profile_button_for_refresh.set_sensitive(has_profile);
-            run_command_button_for_refresh.set_sensitive(has_profile);
-            remove_profile_button_for_refresh.set_sensitive(has_profile);
-        });
+                let selected = selected_name.borrow().clone();
+                let mut selected_profile = None;
+                for (index, profile) in profiles.iter().enumerate() {
+                    let card = Button::new();
+                    card.set_hexpand(true);
+                    card.set_vexpand(false);
+                    card.set_size_request(220, 150);
+                    card.set_tooltip_text(Some("Select this profile to inspect and install it"));
+                    if selected.as_deref() == Some(profile.name.as_str()) {
+                        card.add_css_class("suggested-action");
+                        selected_profile = Some(profile.clone());
+                    }
 
+                    let card_box = Box::new(Orientation::Vertical, 5);
+                    card_box.set_margin_top(8);
+                    card_box.set_margin_bottom(8);
+                    card_box.set_margin_start(8);
+                    card_box.set_margin_end(8);
+                    let preview = Label::new(Some(&file_profile_preview(profile)));
+                    preview.set_halign(gtk::Align::Start);
+                    preview.set_valign(gtk::Align::Start);
+                    preview.set_xalign(0.0);
+                    preview.set_yalign(0.0);
+                    preview.set_wrap(true);
+                    preview.set_max_width_chars(30);
+                    preview.set_size_request(-1, 82);
+                    let name = Label::new(Some(&profile.name));
+                    name.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(&profile.name)));
+                    name.set_halign(gtk::Align::Start);
+                    let status = Label::new(Some(file_profile_status(profile)));
+                    status.set_halign(gtk::Align::Start);
+                    status.set_opacity(0.75);
+                    card_box.append(&preview);
+                    card_box.append(&name);
+                    card_box.append(&status);
+                    card.set_child(Some(&card_box));
+
+                    let profile_for_card = profile.clone();
+                    let store_for_card = store.clone();
+                    let selected_for_card = selected_name.clone();
+                    let update_detail_for_card = update_detail.clone();
+                    let refresh_holder_for_card = refresh_holder.clone();
+                    card.connect_clicked(move |_| {
+                        {
+                            let mut store = store_for_card.borrow_mut();
+                            store.selected = Some(profile_for_card.name.clone());
+                            save_file_profile_store(&store);
+                        }
+                        *selected_for_card.borrow_mut() = Some(profile_for_card.name.clone());
+                        update_detail_for_card(Some(profile_for_card.clone()));
+                        if let Some(refresh) = refresh_holder_for_card.borrow().clone() {
+                            refresh();
+                        }
+                    });
+
+                    gallery_grid.attach(&card, (index % 3) as i32, (index / 3) as i32, 1, 1);
+                }
+
+                if selected_profile.is_none() {
+                    selected_profile = profiles.first().cloned();
+                    if let Some(profile) = selected_profile.clone() {
+                        *selected_name.borrow_mut() = Some(profile.name.clone());
+                        let mut store = store.borrow_mut();
+                        store.selected = Some(profile.name.clone());
+                        save_file_profile_store(&store);
+                    }
+                }
+
+                update_detail(selected_profile);
+            })
+        };
+
+        *refresh_holder.borrow_mut() = Some(refresh_ui.clone());
         *self.file_profiles_refresh.borrow_mut() = Some(refresh_ui.clone());
 
-        let store_for_selection = self.file_profiles.clone();
-        let selected_name_for_selection = selected_name_for_refresh.clone();
-        let preview_title_for_selection = preview_title.clone();
-        let preview_repo_for_selection = preview_repo.clone();
-        let preview_path_for_selection = preview_path.clone();
-        let preview_version_for_selection = preview_version.clone();
-        let preview_command_for_selection = preview_command.clone();
-        let preview_notes_for_selection = preview_notes.clone();
-        list_box.connect_row_selected(move |_, row| {
-            let Some(row) = row else {
-                return;
-            };
-
-            let index = row.index();
-            if index < 0 {
-                return;
-            }
-
-            let profile = {
-                let store = store_for_selection.borrow();
-                store.profiles.get(index as usize).cloned()
-            };
-            let Some(profile) = profile else {
-                return;
-            };
-
-            {
-                let mut store = store_for_selection.borrow_mut();
-                store.selected = Some(profile.name.clone());
-                save_file_profile_store(&store);
-            }
-            *selected_name_for_selection.borrow_mut() = Some(profile.name.clone());
-            let escaped_name = glib::markup_escape_text(&profile.name);
-            preview_title_for_selection.set_markup(&format!("<b>{}</b>", escaped_name));
-            preview_repo_for_selection.set_text(&format!("Repo: {}", profile.repo_url));
-            let install_path = if profile.install_path.trim().is_empty() {
-                default_file_install_path()
-            } else {
-                profile.install_path.clone()
-            };
-            preview_path_for_selection.set_text(&format!("Install path: {}", install_path));
-            let version_text = if profile.version_ref.trim().is_empty() {
-                "Version: latest".to_string()
-            } else {
-                format!("Version: {}", profile.version_ref)
-            };
-            preview_version_for_selection.set_text(&version_text);
-            preview_command_for_selection.set_text(&file_profile_clone_command(&profile));
-            let notes = if profile.notes.trim().is_empty() {
-                "No extra notes were saved for this profile.".to_string()
-            } else {
-                profile.notes.clone()
-            };
-            preview_notes_for_selection.set_text(&notes);
+        let refresh_for_search = refresh_ui.clone();
+        search_entry.connect_changed(move |_| refresh_for_search());
+        let refresh_for_clear = refresh_ui.clone();
+        let search_for_clear = search_entry.clone();
+        clear_search_button.connect_clicked(move |_| {
+            search_for_clear.set_text("");
+            refresh_for_clear();
         });
+
+        let refresh_for_sort = refresh_ui.clone();
+        let sort_mode_for_dropdown = sort_mode.clone();
+        sort_dropdown.connect_selected_notify(move |dropdown| {
+            let value = dropdown
+                .selected_item()
+                .and_then(|item| item.downcast::<gtk::StringObject>().ok())
+                .map(|item| item.string().to_string())
+                .unwrap_or_default();
+            *sort_mode_for_dropdown.borrow_mut() = match value.as_str() {
+                "Name" => "name".to_string(),
+                "Repository" => "repo".to_string(),
+                _ => "recent".to_string(),
+            };
+            refresh_for_sort();
+        });
+
+        for (button, mode) in [
+            (&all_filter_button, "all"),
+            (&installed_filter_button, "installed"),
+            (&missing_filter_button, "missing"),
+        ] {
+            let filter_mode = filter_mode.clone();
+            let refresh = refresh_ui.clone();
+            button.connect_clicked(move |_| {
+                *filter_mode.borrow_mut() = mode.to_string();
+                refresh();
+            });
+        }
 
         let parent = self.window.clone();
         let store_for_add = self.file_profiles.clone();
-        let refresh_ui_for_add = refresh_ui.clone();
-        let selected_name_for_add = selected_name_for_refresh.clone();
+        let refresh_for_add = refresh_ui.clone();
+        let selected_for_add = selected_name.clone();
         add_profile_button.connect_clicked(move |_| {
             let parent = parent.clone();
             let store_for_add = store_for_add.clone();
-            let refresh_ui_for_add = refresh_ui_for_add.clone();
-            let selected_name_for_add = selected_name_for_add.clone();
+            let refresh_for_add = refresh_for_add.clone();
+            let selected_for_add = selected_for_add.clone();
             glib::MainContext::default().spawn_local(async move {
                 let dialog = gtk::Dialog::with_buttons(
-                    Some("Add .file Profile"),
+                    Some("Add .file profile"),
                     Some(&parent),
                     gtk::DialogFlags::MODAL,
-                    &[
-                        ("Cancel", gtk::ResponseType::Cancel),
-                        ("Add", gtk::ResponseType::Accept),
-                    ],
+                    &[("Cancel", gtk::ResponseType::Cancel), ("Add", gtk::ResponseType::Accept)],
                 );
-
                 let content = dialog.content_area();
-                content.set_spacing(10);
+                content.set_spacing(8);
                 content.set_margin_top(12);
                 content.set_margin_bottom(12);
                 content.set_margin_start(12);
                 content.set_margin_end(12);
-
                 let name_entry = Entry::new();
                 name_entry.set_placeholder_text(Some("Profile name"));
                 let repo_entry = Entry::new();
@@ -1633,311 +1832,121 @@ impl ConfigGUI {
                 let version_entry = Entry::new();
                 version_entry.set_placeholder_text(Some("Optional branch or tag"));
                 let notes_entry = Entry::new();
-                notes_entry.set_placeholder_text(Some("Optional notes or config label"));
-
-                content.append(&Label::new(Some("Name")));
-                content.append(&name_entry);
-                content.append(&Label::new(Some("GitHub repo URL")));
-                content.append(&repo_entry);
-                content.append(&Label::new(Some("Install path")));
-                content.append(&path_entry);
-                content.append(&Label::new(Some("Git ref / branch")));
-                content.append(&version_entry);
-                content.append(&Label::new(Some("Notes")));
-                content.append(&notes_entry);
-
-                let response = dialog.run_future().await;
-                if response == gtk::ResponseType::Accept {
-                    let name = name_entry.text().trim().to_string();
-                    let repo_url = repo_entry.text().trim().to_string();
-                    let install_path = path_entry.text().trim().to_string();
-                    let version_ref = version_entry.text().trim().to_string();
-                    let notes = notes_entry.text().trim().to_string();
-
-                    if name.is_empty() || repo_url.is_empty() {
-                        show_message_dialog(
-                            &parent,
-                            gtk::MessageType::Warning,
-                            "Missing Data",
-                            "Both a profile name and a GitHub repo URL are required.",
-                        );
-                    } else {
-                        {
-                            let mut store = store_for_add.borrow_mut();
-                            store.profiles.push(FileProfile {
-                                name: name.clone(),
-                                repo_url,
-                                install_path,
-                                version_ref,
-                                notes,
-                            });
-                            store.selected = Some(name.clone());
-                            save_file_profile_store(&store);
-                        }
-
-                        *selected_name_for_add.borrow_mut() = Some(name);
-                        refresh_ui_for_add();
-                    }
+                notes_entry.set_placeholder_text(Some("Optional notes"));
+                for (label, entry) in [
+                    ("Name", name_entry.clone()),
+                    ("Repository URL", repo_entry.clone()),
+                    ("Install path", path_entry.clone()),
+                    ("Branch / ref", version_entry.clone()),
+                    ("Notes", notes_entry.clone()),
+                ] {
+                    content.append(&Label::new(Some(label)));
+                    content.append(&entry);
                 }
 
+                if dialog.run_future().await == gtk::ResponseType::Accept {
+                    let profile = FileProfile {
+                        name: name_entry.text().trim().to_string(),
+                        repo_url: repo_entry.text().trim().to_string(),
+                        install_path: path_entry.text().trim().to_string(),
+                        version_ref: version_entry.text().trim().to_string(),
+                        notes: notes_entry.text().trim().to_string(),
+                    };
+                    if profile.name.is_empty() || profile.repo_url.is_empty() {
+                        show_message_dialog(&parent, gtk::MessageType::Warning, "Missing data", "A profile name and repository URL are required.");
+                    } else {
+                        *selected_for_add.borrow_mut() = Some(profile.name.clone());
+                        let mut store = store_for_add.borrow_mut();
+                        store.profiles.retain(|item| item.name != profile.name);
+                        store.selected = Some(profile.name.clone());
+                        store.profiles.push(profile);
+                        save_file_profile_store(&store);
+                        refresh_for_add();
+                    }
+                }
                 dialog.close();
             });
         });
 
         let parent = self.window.clone();
         let store_for_open = self.file_profiles.clone();
-        let selected_name_for_open = selected_name_for_refresh.clone();
-        let stack_for_open = self.stack.clone();
+        let selected_for_open = selected_name.clone();
         open_profile_button.connect_clicked(move |_| {
-            let target = selected_name_for_open.borrow().clone();
-            if target.is_some() {
-                stack_for_open.set_visible_child_name("files");
-            }
-
+            let selected = selected_for_open.borrow().clone();
             let store = store_for_open.borrow();
-            if let Some(profile) = target.and_then(|wanted| {
-                store
-                    .profiles
-                    .iter()
-                    .find(|profile| profile.name == wanted)
-                    .cloned()
-            }) {
+            if let Some(profile) = selected.and_then(|name| store.profiles.iter().find(|item| item.name == name).cloned()) {
                 open_uri(&parent, &profile.repo_url);
             }
         });
 
         let parent = self.window.clone();
         let store_for_run = self.file_profiles.clone();
-        let selected_name_for_run = selected_name_for_refresh.clone();
+        let selected_for_run = selected_name.clone();
         run_command_button.connect_clicked(move |button| {
+            let selected = selected_for_run.borrow().clone();
             let store = store_for_run.borrow();
-            if let Some(profile) = selected_name_for_run.borrow().as_ref().and_then(|wanted| {
-                store
-                    .profiles
-                    .iter()
-                    .find(|profile| &profile.name == wanted)
-            }) {
-                install_file_profile(&parent, button, profile);
+            if let Some(profile) = selected.and_then(|name| store.profiles.iter().find(|item| item.name == name).cloned()) {
+                install_file_profile(&parent, button, &profile);
             }
         });
 
         let parent = self.window.clone();
         let store_for_remove = self.file_profiles.clone();
-        let refresh_ui_for_remove = refresh_ui.clone();
-        let selected_name_for_remove = selected_name_for_refresh.clone();
+        let selected_for_remove = selected_name.clone();
+        let refresh_for_remove = refresh_ui.clone();
         remove_profile_button.connect_clicked(move |_| {
-            let selected = selected_name_for_remove.borrow().clone();
-            if let Some(selected) = selected {
-                let mut store = store_for_remove.borrow_mut();
-                store.profiles.retain(|profile| profile.name != selected);
-                if store.selected.as_deref() == Some(selected.as_str()) {
-                    store.selected = store.profiles.first().map(|profile| profile.name.clone());
-                }
-                save_file_profile_store(&store);
-                *selected_name_for_remove.borrow_mut() = store.selected.clone();
-                refresh_ui_for_remove();
-            } else {
-                show_message_dialog(
-                    &parent,
-                    gtk::MessageType::Warning,
-                    "Nothing Selected",
-                    "Select a .file profile first.",
-                );
-            }
-        });
-
-        let button_row = Box::new(Orientation::Horizontal, 10);
-        button_row.append(&add_profile_button);
-        button_row.append(&open_profile_button);
-        button_row.append(&run_command_button);
-        button_row.append(&remove_profile_button);
-
-        container.append(&title_label);
-        container.append(&description_label);
-        container.append(&button_row);
-        container.append(&Separator::new(Orientation::Horizontal));
-        container.append(&body_row);
-        container.append(&hint_label);
-
-        scrolled_window.set_child(Some(&container));
-        self.stack
-            .add_titled(&scrolled_window, Some("files"), ".files");
-
-        refresh_ui();
-    }
-
-    fn add_dotfiles_page(&mut self) {
-        let scrolled_window = ScrolledWindow::new();
-        scrolled_window.set_vexpand(true);
-        scrolled_window.set_hexpand(true);
-
-        let container = Box::new(Orientation::Vertical, 14);
-        container.set_margin_top(16);
-        container.set_margin_bottom(16);
-        container.set_margin_start(16);
-        container.set_margin_end(16);
-
-        let title_label = Label::new(Some("Dotfiles from GitHub"));
-        title_label.set_markup("<b>Dotfiles from GitHub</b>");
-        title_label.set_halign(gtk::Align::Start);
-
-        let description_label = Label::new(Some(
-            "Paste a GitHub repository link for your dotfiles, then open the repo or clone it directly in the background.",
-        ));
-        description_label.set_wrap(true);
-        description_label.set_halign(gtk::Align::Start);
-        description_label.set_opacity(0.8);
-
-        let files_button_row = Box::new(Orientation::Horizontal, 10);
-        let open_files_button = Button::with_label("Install .files");
-        let add_file_button = button_with_icon_label("list-add-symbolic", ".file hinzufügen");
-
-        let stack_for_open_files = self.stack.clone();
-        open_files_button.connect_clicked(move |_| {
-            stack_for_open_files.set_visible_child_name("files");
+            let Some(selected) = selected_for_remove.borrow().clone() else {
+                show_message_dialog(&parent, gtk::MessageType::Warning, "Nothing selected", "Select a profile first.");
+                return;
+            };
+            let mut store = store_for_remove.borrow_mut();
+            store.profiles.retain(|profile| profile.name != selected);
+            store.selected = store.profiles.first().map(|profile| profile.name.clone());
+            *selected_for_remove.borrow_mut() = store.selected.clone();
+            save_file_profile_store(&store);
+            refresh_for_remove();
         });
 
         let parent = self.window.clone();
-        let store_for_add = self.file_profiles.clone();
-        let refresh_holder_for_add = self.file_profiles_refresh.clone();
-        let stack_for_add = self.stack.clone();
-        add_file_button.connect_clicked(move |_| {
-            let parent = parent.clone();
-            let store_for_add = store_for_add.clone();
-            let refresh_holder_for_add = refresh_holder_for_add.clone();
-            let stack_for_add = stack_for_add.clone();
-            glib::MainContext::default().spawn_local(async move {
-                let dialog = gtk::Dialog::with_buttons(
-                    Some("Add .file Profile"),
-                    Some(&parent),
-                    gtk::DialogFlags::MODAL,
-                    &[
-                        ("Cancel", gtk::ResponseType::Cancel),
-                        ("Add", gtk::ResponseType::Accept),
-                    ],
-                );
-
-                let content = dialog.content_area();
-                content.set_spacing(10);
-                content.set_margin_top(12);
-                content.set_margin_bottom(12);
-                content.set_margin_start(12);
-                content.set_margin_end(12);
-
-                let name_entry = Entry::new();
-                name_entry.set_placeholder_text(Some("Profile name"));
-                let repo_entry = Entry::new();
-                repo_entry.set_placeholder_text(Some("https://github.com/username/dotfiles"));
-                let path_entry = Entry::new();
-                path_entry.set_placeholder_text(Some(&default_file_install_path()));
-                let version_entry = Entry::new();
-                version_entry.set_placeholder_text(Some("Optional branch or tag"));
-                let notes_entry = Entry::new();
-                notes_entry.set_placeholder_text(Some("Optional notes or config label"));
-
-                content.append(&Label::new(Some("Name")));
-                content.append(&name_entry);
-                content.append(&Label::new(Some("GitHub repo URL")));
-                content.append(&repo_entry);
-                content.append(&Label::new(Some("Install path")));
-                content.append(&path_entry);
-                content.append(&Label::new(Some("Git ref / branch")));
-                content.append(&version_entry);
-                content.append(&Label::new(Some("Notes")));
-                content.append(&notes_entry);
-
-                if dialog.run_future().await == gtk::ResponseType::Accept {
-                    let name = name_entry.text().trim().to_string();
-                    let repo_url = repo_entry.text().trim().to_string();
-                    let install_path = path_entry.text().trim().to_string();
-                    let version_ref = version_entry.text().trim().to_string();
-                    let notes = notes_entry.text().trim().to_string();
-
-                    if !name.is_empty() && !repo_url.is_empty() {
-                        let mut store = store_for_add.borrow_mut();
-                        store.profiles.push(FileProfile {
-                            name: name.clone(),
-                            repo_url,
-                            install_path,
-                            version_ref,
-                            notes,
-                        });
-                        store.selected = Some(name);
-                        save_file_profile_store(&store);
-                    }
-
-                    if let Some(refresh) = refresh_holder_for_add.borrow().as_ref() {
-                        refresh();
-                    }
-                }
-
-                dialog.close();
-                stack_for_add.set_visible_child_name("files");
-            });
-        });
-
-        files_button_row.append(&open_files_button);
-        files_button_row.append(&add_file_button);
-
-        let entry = Entry::new();
-        entry.set_placeholder_text(Some("https://github.com/username/dotfiles"));
-
-        let button_row = Box::new(Orientation::Horizontal, 10);
-        let open_button = Button::with_label("Open GitHub Link");
-        let run_button = Button::with_label("Clone in Background");
-
-        let parent = self.window.clone();
-        let entry_for_open = entry.clone();
-        open_button.connect_clicked(move |_| {
-            let url = entry_for_open.text().to_string();
-            open_uri(&parent, &url);
-        });
-
-        let parent = self.window.clone();
-        let entry_for_run = entry.clone();
-        run_button.connect_clicked(move |button| {
-            let url = entry_for_run.text().trim().to_string();
-
-            if url.is_empty() {
-                show_message_dialog(
-                    &parent,
-                    gtk::MessageType::Warning,
-                    "Missing Link",
-                    "Please paste a GitHub link first.",
-                );
+        let store_for_quick = self.file_profiles.clone();
+        let selected_for_quick = selected_name.clone();
+        let refresh_for_quick = refresh_ui.clone();
+        quick_install_button.connect_clicked(move |button| {
+            let repo_url = quick_repo_entry.text().trim().to_string();
+            if repo_url.is_empty() {
+                show_message_dialog(&parent, gtk::MessageType::Warning, "Missing repository", "Paste a repository URL before installing.");
                 return;
             }
-
             let profile = FileProfile {
-                name: "Dotfiles".to_string(),
-                repo_url: url,
-                install_path: "~/dotfiles".to_string(),
-                version_ref: String::new(),
-                notes: String::new(),
+                name: file_profile_name_from_url(&repo_url),
+                repo_url,
+                install_path: quick_path_entry.text().trim().to_string(),
+                version_ref: quick_ref_entry.text().trim().to_string(),
+                notes: "Added from the quick install form.".to_string(),
             };
+            {
+                let mut store = store_for_quick.borrow_mut();
+                store.profiles.retain(|item| normalize_git_remote_identity(&item.repo_url) != normalize_git_remote_identity(&profile.repo_url));
+                store.selected = Some(profile.name.clone());
+                store.profiles.push(profile.clone());
+                save_file_profile_store(&store);
+            }
+            *selected_for_quick.borrow_mut() = Some(profile.name.clone());
+            refresh_for_quick();
             install_file_profile(&parent, button, &profile);
         });
 
-        button_row.append(&open_button);
-        button_row.append(&run_button);
+        let refresh_for_button = refresh_ui.clone();
+        refresh_button.connect_clicked(move |_| refresh_for_button());
 
-        let hint_label = Label::new(Some(
-            "The repository is cloned to ~/dotfiles in the background. If it includes an install script, review the project README before running it.",
-        ));
-        hint_label.set_wrap(true);
-        hint_label.set_halign(gtk::Align::Start);
-        hint_label.set_opacity(0.75);
-
-        container.append(&title_label);
-        container.append(&description_label);
-        container.append(&files_button_row);
-        container.append(&entry);
-        container.append(&button_row);
-        container.append(&hint_label);
-
+        container.append(&header_row);
+        container.append(&search_row);
+        container.append(&filter_row);
+        container.append(&body_row);
+        container.append(&quick_install_frame);
         scrolled_window.set_child(Some(&container));
-        self.stack
-            .add_titled(&scrolled_window, Some("dotfiles"), "Dotfiles");
+        self.stack.add_titled(&scrolled_window, Some("files"), ".files");
+        refresh_ui();
     }
 
     fn add_hyprland_install_page(&mut self) {
@@ -2046,7 +2055,6 @@ impl ConfigGUI {
 
         self.rebuild_navigation();
         self.add_setup_overview_page(note);
-        self.add_dotfiles_page();
         self.add_files_page();
         self.add_hyprland_install_page();
     }
@@ -2273,7 +2281,6 @@ impl ConfigGUI {
 
         self.rebuild_navigation();
         self.add_setup_overview_page("Your Hyprland config file is ready to edit.");
-        self.add_dotfiles_page();
         self.add_files_page();
         self.add_hyprland_install_page();
 

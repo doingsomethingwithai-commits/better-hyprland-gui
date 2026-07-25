@@ -8,10 +8,12 @@
 
 </div>
 
+> This project is a personal rework of the original [HyprGUI repository by MarkusVolk](https://github.com/MarkusVolk/hyprgui). It is not the original repository; this fork/rework maintains its own changes and direction.
+
 ## What it does
 
 - Edit Hyprland configuration through a desktop UI.
-- Open a dedicated page for installing dotfiles from GitHub repository links.
+- Browse, preview, and install dotfiles from one combined `.files` workspace.
 - Open a dedicated page for Hyprland installation and update guidance on Linux.
 - Install and update Hyprland directly from the GUI, and update the software itself from GitHub when needed.
 
@@ -122,7 +124,7 @@ cargo run --release
 3. If the app is broken, run the hard update command from the repo.
 4. If you need a clean slate, run the hard delete command from the repo and reinstall.
 5. If the app still does not appear in your desktop menu after a reinstall, rerun the bootstrap script so the launcher entry is refreshed.
-6. Open the dotfiles page and paste a GitHub repository URL.
+6. Open the `.files` workspace, add a profile, or use the quick-install form for a GitHub repository URL.
 7. Return to the main config pages and tune Hyprland settings.
 
 ## Why This Layout
@@ -132,7 +134,7 @@ This repository is intentionally split into two layers:
 - A GUI for configuration and setup assistance.
 - A bootstrap script for system preparation and app startup.
 
-The Hyprland package install now lives in the GUI so there is only one visible install path for Hyprland itself.
+The Hyprland package install now lives in the GUI so there is only one visible install path for Hyprland itself. Dotfile browsing and installation likewise share one `.files` workspace, so users can select a profile, inspect its preview, and install or update it without switching pages.
 
 ## TODO
 

@@ -22,6 +22,11 @@ fn build_ui(app: &Application) {
 
     let config_path_full = get_config_path();
 
+    let gui_clone = gui.clone();
+    gui.borrow().save_button.connect_clicked(move |_| {
+        save_config_file(gui_clone.clone());
+    });
+
     if !config_path_full.exists() {
         gui.borrow_mut().load_landing_pages(&format!(
             "Hyprland config not found at ~/{}. Use the install pages below to get started.",
@@ -46,11 +51,6 @@ fn build_ui(app: &Application) {
         };
         let parsed_config = parse_config(&config_str);
         gui.borrow_mut().load_config(&parsed_config);
-
-        let gui_clone = gui.clone();
-        gui.borrow().save_button.connect_clicked(move |_| {
-            save_config_file(gui_clone.clone());
-        });
 
         let undo_button = Button::with_label("Undo Changes");
         let copy_button = Button::with_label("Copyright");
