@@ -1,7 +1,7 @@
 use gtk::{
-    gdk, gio, glib, prelude::*, Application, ApplicationWindow, Box, Button, ColorButton, DropDown,
-    Entry, Frame, Grid, HeaderBar, Image, Label, MessageDialog, Orientation,
-    Popover, ScrolledWindow, Separator, SpinButton, Stack, StackSidebar, StringList, Switch,
+    gdk, gio, glib, prelude::*, Application, ApplicationWindow, Box, Button, ColorButton,
+    CssProvider, DropDown, Entry, Frame, Grid, HeaderBar, Image, Label, MessageDialog, Orientation,
+    Paned, Popover, ScrolledWindow, Separator, SpinButton, Stack, StackSidebar, StringList, Switch,
     Widget,
 };
 
@@ -17,7 +17,10 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+const SOFTWARE_REPO_URL: &str =
+    "https://github.com/doingsomethingwithai-commits/better-hyprland-gui.git";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -74,6 +77,8 @@ fn add_dropdown_option(
     description_label.set_margin_bottom(5);
     description_label.set_margin_start(5);
     description_label.set_margin_end(5);
+    description_label.set_wrap(true);
+    description_label.set_max_width_chars(56);
     popover.set_child(Some(&description_label));
     popover.set_position(gtk::PositionType::Right);
 
@@ -176,7 +181,7 @@ fn show_install_result(parent: &ApplicationWindow, title: &str, success: bool, o
 }
 
 fn git_repo_root(path: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(path)
         .args(["rev-parse", "--show-toplevel"])
@@ -223,6 +228,14 @@ fn is_hyprgui_repo(path: &Path) -> bool {
 
 fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
+}
+
+fn git_command() -> Command {
+    if Path::new("/usr/bin/git").is_file() {
+        Command::new("/usr/bin/git")
+    } else {
+        Command::new("git")
+    }
 }
 
 fn default_app_dir() -> Option<PathBuf> {
@@ -320,7 +333,7 @@ fn cargo_binary() -> Option<PathBuf> {
 }
 
 fn git_current_branch(repo_dir: &Path) -> Result<Option<String>, String> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_dir)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -366,7 +379,7 @@ fn validate_version_ref(version_ref: &str) -> Result<&str, String> {
 fn ensure_repo_clean(repo_dir: &Path) -> Result<(), String> {
     ensure_git_repository(repo_dir)?;
 
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_dir)
         .args(["status", "--porcelain"])
@@ -404,7 +417,7 @@ fn ensure_git_repository(repo_dir: &Path) -> Result<(), String> {
 fn fetch_repo(repo_dir: &Path) -> Result<(), String> {
     ensure_git_repository(repo_dir)?;
 
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_dir)
         .args(["fetch", "--prune", "--tags", "origin"])
@@ -421,6 +434,47 @@ fn fetch_repo(repo_dir: &Path) -> Result<(), String> {
     }
 }
 
+fn sync_software_repo_from_github(
+    repo_dir: &Path,
+    version_ref: Option<&str>,
+) -> Result<(), String> {
+    ensure_git_repository(repo_dir)?;
+
+    let remote_update = git_command()
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["remote", "set-url", "origin", SOFTWARE_REPO_URL])
+        .output()
+        .map_err(|error| format!("Failed to configure the GitHub remote: {error}"))?;
+    if !remote_update.status.success() {
+        return Err(format!(
+            "Could not configure the GitHub remote.\n\n{}",
+            String::from_utf8_lossy(&remote_update.stderr)
+        ));
+    }
+
+    fetch_repo(repo_dir)?;
+
+    let reset = git_command()
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["reset", "--hard", "origin/main"])
+        .output()
+        .map_err(|error| format!("Failed to reset the local checkout to GitHub: {error}"))?;
+    if !reset.status.success() {
+        return Err(format!(
+            "Could not reset the local checkout to GitHub main.\n\n{}",
+            String::from_utf8_lossy(&reset.stderr)
+        ));
+    }
+
+    if let Some(version_ref) = version_ref {
+        checkout_repo_ref(repo_dir, version_ref)?;
+    }
+
+    Ok(())
+}
+
 fn checkout_repo_ref(repo_dir: &Path, version_ref: &str) -> Result<(), String> {
     ensure_repo_clean(repo_dir)?;
     let version_ref = validate_version_ref(version_ref)?;
@@ -433,7 +487,7 @@ fn checkout_repo_ref(repo_dir: &Path, version_ref: &str) -> Result<(), String> {
     let mut last_error = String::new();
 
     for candidate in candidates {
-        let output = Command::new("git")
+        let output = git_command()
             .arg("-C")
             .arg(repo_dir)
             .args(["checkout", "--detach", &candidate])
@@ -452,48 +506,6 @@ fn checkout_repo_ref(repo_dir: &Path, version_ref: &str) -> Result<(), String> {
     ))
 }
 
-fn update_repo_checkout(repo_dir: &Path) -> Result<(), String> {
-    ensure_repo_clean(repo_dir)?;
-    let current_branch = git_current_branch(repo_dir)?.unwrap_or_default();
-    fetch_repo(repo_dir)?;
-
-    if current_branch.is_empty() || current_branch == "HEAD" {
-        return Err(
-            "The repository is in detached-HEAD state. Enter an explicit version ref or switch to a branch before updating."
-                .to_string(),
-        );
-    }
-
-    let remote_branch = format!("origin/{current_branch}");
-    let verify = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
-        .args(["rev-parse", "--verify", &remote_branch])
-        .output()
-        .map_err(|err| format!("Failed to verify {remote_branch}: {err}"))?;
-    if !verify.status.success() {
-        return Err(format!(
-            "The current branch '{current_branch}' has no matching origin branch."
-        ));
-    }
-
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
-        .args(["merge", "--ff-only", &remote_branch])
-        .output()
-        .map_err(|err| format!("Failed to fast-forward from {remote_branch}: {err}"))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "The update is not a safe fast-forward. Resolve the branch manually.\n\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
 fn run_background_task<F>(
     parent: &ApplicationWindow,
     button: Option<&Button>,
@@ -501,6 +513,30 @@ fn run_background_task<F>(
     success_title: &str,
     success_message: &str,
     failure_title: &str,
+    task: F,
+) where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    run_background_task_with_completion(
+        parent,
+        button,
+        running_label,
+        success_title,
+        success_message,
+        failure_title,
+        None,
+        task,
+    );
+}
+
+fn run_background_task_with_completion<F>(
+    parent: &ApplicationWindow,
+    button: Option<&Button>,
+    running_label: &str,
+    success_title: &str,
+    success_message: &str,
+    failure_title: &str,
+    on_success: Option<std::boxed::Box<dyn FnOnce() + 'static>>,
     task: F,
 ) where
     F: FnOnce() -> Result<(), String> + Send + 'static,
@@ -521,12 +557,17 @@ fn run_background_task<F>(
     let success_title = success_title.to_string();
     let success_message = success_message.to_string();
     let failure_title = failure_title.to_string();
+    let mut on_success = on_success;
 
     glib::timeout_add_local(Duration::from_millis(100), move || {
         match receiver.try_recv() {
             Ok(Ok(())) => {
                 restore_task_button(&button_state);
-                show_install_result(&parent, &success_title, true, &success_message);
+                if let Some(on_success) = on_success.take() {
+                    on_success();
+                } else {
+                    show_install_result(&parent, &success_title, true, &success_message);
+                }
                 glib::ControlFlow::Break
             }
             Ok(Err(error)) => {
@@ -571,8 +612,7 @@ fn command_result(mut command: Command) -> Result<(), String> {
         if lowercase_stderr.contains("db.lck")
             || lowercase_stderr.contains("unable to lock database")
             || lowercase_stderr.contains("could not lock database")
-            || (lowercase_stderr.contains("datenbank")
-                && lowercase_stderr.contains("sperr"))
+            || (lowercase_stderr.contains("datenbank") && lowercase_stderr.contains("sperr"))
         {
             return Err(
                 "Another system package manager is currently using the package database. Close the other installer or update process, wait for it to finish, and try again. Do not delete the lock file manually."
@@ -580,10 +620,7 @@ fn command_result(mut command: Command) -> Result<(), String> {
             );
         }
 
-        Err(format!(
-            "The command failed.\n\n{}",
-            stderr
-        ))
+        Err(format!("The command failed.\n\n{}", stderr))
     }
 }
 
@@ -598,6 +635,46 @@ fn rebuild_software_from_repo(repo_dir: &Path) -> Result<(), String> {
         .current_dir(repo_dir)
         .args(["build", "--release"]);
     command_result(cargo_command).map_err(|error| format!("The rebuild failed.\n\n{error}"))
+}
+
+fn restart_updated_application(parent: &ApplicationWindow, repo_dir: &Path) -> Result<(), String> {
+    let binary_path = repo_dir.join("target").join("release").join("hyprgui");
+    if !binary_path.is_file() {
+        return Err(format!(
+            "The updated application binary was not found at {}.",
+            binary_path.display()
+        ));
+    }
+
+    let old_pid = std::process::id().to_string();
+    let binary_path = binary_path.to_string_lossy().into_owned();
+    let unit_name = format!("hyprgui-restart-{old_pid}");
+    let restart_script = "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec \"$2\"";
+    Command::new("/usr/bin/systemd-run")
+        .args([
+            "--user",
+            "--quiet",
+            "--collect",
+            &format!("--unit={unit_name}"),
+            &format!("--setenv=APP_DIR={}", repo_dir.display()),
+            &format!("--setenv=HYPRGUI_REPO_DIR={}", repo_dir.display()),
+            "/bin/sh",
+            "-c",
+            restart_script,
+            "hyprgui-restart",
+            &old_pid,
+            &binary_path,
+        ])
+        .spawn()
+        .map_err(|error| format!("The updated application could not be restarted: {error}"))?;
+
+    // The application ID stays unchanged, so the desktop shell keeps the
+    // existing taskbar entry while the new process takes over.
+    parent.close();
+    if let Some(application) = parent.application() {
+        application.quit();
+    }
+    Ok(())
 }
 
 fn update_software_from_github(
@@ -620,21 +697,29 @@ fn update_software_from_github(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    run_background_task(
+    let restart_repo_dir = repo_dir.clone();
+    let restart_parent = parent.clone();
+    let restart_action: std::boxed::Box<dyn FnOnce() + 'static> = std::boxed::Box::new(move || {
+        if let Err(error) = restart_updated_application(&restart_parent, &restart_repo_dir) {
+            show_message_dialog(
+                &restart_parent,
+                gtk::MessageType::Error,
+                "Restart Failed",
+                &error,
+            );
+        }
+    });
+
+    run_background_task_with_completion(
         parent,
         Some(button),
         "Updating software…",
         "Software Updated",
-        "The GUI repository was updated and rebuilt successfully. Restart the application to use the latest version.",
+        "The new version was built. Restarting the application now…",
         "Software Update Failed",
+        Some(restart_action),
         move || {
-            if let Some(version_ref) = pinned_ref {
-                ensure_repo_clean(&repo_dir)?;
-                fetch_repo(&repo_dir)?;
-                checkout_repo_ref(&repo_dir, &version_ref)?;
-            } else {
-                update_repo_checkout(&repo_dir)?;
-            }
+            sync_software_repo_from_github(&repo_dir, pinned_ref.as_deref())?;
             rebuild_software_from_repo(&repo_dir)
         },
     );
@@ -842,6 +927,72 @@ fn normalize_repo_url(value: &str) -> String {
         .to_string()
 }
 
+fn validate_repository_url(value: &str) -> Result<String, String> {
+    let normalized = normalize_repo_url(value);
+    if normalized.is_empty() {
+        return Err("Paste a Git repository URL first.".to_string());
+    }
+    if normalized
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err("The repository URL contains spaces or invalid characters.".to_string());
+    }
+
+    let (host, path) = if let Some(rest) = normalized.strip_prefix("git@") {
+        rest.split_once(':')
+            .map(|(host, path)| (host, path))
+            .ok_or_else(|| {
+                "Use a complete Git URL, for example git@github.com:user/dotfiles.git.".to_string()
+            })?
+    } else if let Some(rest) = normalized
+        .strip_prefix("https://")
+        .or_else(|| normalized.strip_prefix("http://"))
+        .or_else(|| normalized.strip_prefix("ssh://"))
+        .or_else(|| normalized.strip_prefix("git://"))
+    {
+        rest.split_once('/')
+            .map(|(host, path)| (host, path))
+            .ok_or_else(|| "Use a complete Git URL with a host and repository path.".to_string())?
+    } else {
+        return Err("Unsupported repository URL. Use HTTPS or SSH, for example https://github.com/user/dotfiles.git.".to_string());
+    };
+
+    let path_parts = path
+        .trim_end_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if host.is_empty() || path_parts.len() < 2 || path_parts.iter().any(|part| *part == "..") {
+        return Err("That link does not point to a Git repository. Use the repository's Clone URL from GitHub.".to_string());
+    }
+    if host.eq_ignore_ascii_case("youtube.com")
+        || host.eq_ignore_ascii_case("www.youtube.com")
+        || host.eq_ignore_ascii_case("youtu.be")
+    {
+        return Err("That is a video/redirect link, not a Git repository. Paste the dotfiles repository's Clone URL.".to_string());
+    }
+
+    Ok(normalized)
+}
+
+fn verify_repository_access(repo_url: &str) -> Result<(), String> {
+    let output = git_command()
+        .args(["ls-remote", "--quiet", "--", repo_url])
+        .output()
+        .map_err(|error| format!("Could not start Git: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if detail.is_empty() {
+        "Git could not reach this repository. Check the URL and that the repository is public or accessible with your Git credentials.".to_string()
+    } else {
+        format!("Git could not reach this repository.\n\n{detail}")
+    })
+}
+
 fn normalize_git_remote_identity(value: &str) -> String {
     let mut normalized = normalize_repo_url(value).replace('\\', "/");
 
@@ -876,7 +1027,7 @@ fn normalize_git_remote_identity(value: &str) -> String {
 }
 
 fn verify_repo_remote(repo_dir: &Path, expected_url: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_dir)
         .args(["remote", "get-url", "origin"])
@@ -890,13 +1041,27 @@ fn verify_repo_remote(repo_dir: &Path, expected_url: &str) -> Result<(), String>
         ));
     }
 
-    let actual_url = String::from_utf8_lossy(&output.stdout);
+    let actual_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let actual_lower = actual_url.to_ascii_lowercase();
+    if actual_lower.contains("youtube.com/redirect") || actual_lower.contains("youtu.be/") {
+        // Older profiles could be created from a video-description redirect.
+        // The selected profile URL is now authoritative, so repair the origin
+        // before fetching instead of treating the existing checkout as foreign.
+        let mut command = git_command();
+        command
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["remote", "set-url", "origin", expected_url]);
+        command_result(command)?;
+        return Ok(());
+    }
+
     let expected = normalize_git_remote_identity(expected_url);
     let actual = normalize_git_remote_identity(&actual_url);
     if expected.is_empty() || expected != actual {
         return Err(format!(
             "The install path belongs to a different repository.\n\nExpected: {expected_url}\nActual: {}",
-            actual_url.trim()
+            actual_url
         ));
     }
 
@@ -984,6 +1149,109 @@ fn file_profile_preview(profile: &FileProfile) -> String {
     "Install this profile to preview its files here.".to_string()
 }
 
+fn copy_profile_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    if source.is_dir() {
+        fs::create_dir_all(destination)
+            .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
+        for entry in fs::read_dir(source)
+            .map_err(|error| format!("Could not read {}: {error}", source.display()))?
+        {
+            let entry =
+                entry.map_err(|error| format!("Could not inspect profile file: {error}"))?;
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            copy_profile_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    }
+    if destination.exists() {
+        if destination.is_dir() {
+            fs::remove_dir_all(destination)
+                .map_err(|error| format!("Could not replace {}: {error}", destination.display()))?;
+        } else {
+            fs::remove_file(destination)
+                .map_err(|error| format!("Could not replace {}: {error}", destination.display()))?;
+        }
+    }
+    fs::copy(source, destination)
+        .map_err(|error| format!("Could not copy {}: {error}", source.display()))?;
+    Ok(())
+}
+
+fn apply_file_profile(profile: &FileProfile) -> Result<String, String> {
+    let profile_root = file_profile_install_path(profile);
+    if !profile_root.join(".git").is_dir() {
+        return Err("Install this profile before applying it.".to_string());
+    }
+
+    let home = home_dir().ok_or_else(|| "Could not determine the home directory.".to_string())?;
+    let copy_plan = if profile_root.join("dots").is_dir() {
+        // Repositories such as end-4/dots-hyprland keep the actual home tree
+        // below `dots/`. Keep the plan limited to dot-directories so backups
+        // never include the whole home directory.
+        let dots = profile_root.join("dots");
+        let mut plan = Vec::new();
+        for name in [".config", ".local"] {
+            let source = dots.join(name);
+            if source.is_dir() {
+                plan.push((source, home.join(name)));
+            }
+        }
+        plan
+    } else if profile_root.join(".config").is_dir() {
+        vec![(profile_root.join(".config"), home.join(".config"))]
+    } else if profile_root.join("hypr").is_dir() {
+        vec![(profile_root.join("hypr"), home.join(".config").join("hypr"))]
+    } else {
+        return Err("This profile does not contain a supported dotfiles tree (expected dots/.config, .config, or hypr).".to_string());
+    };
+    if copy_plan.is_empty() {
+        return Err(
+            "The dots directory does not contain .config or .local files to install.".to_string(),
+        );
+    }
+
+    let stamp = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("Could not create backup timestamp: {error}"))?
+        .as_secs();
+    let backup = home
+        .join(".config")
+        .join("hyprgui")
+        .join("backups")
+        .join(format!("{}-{stamp}", profile.name.replace('/', "-")));
+
+    for (index, (_, destination)) in copy_plan.iter().enumerate() {
+        if destination.is_dir() {
+            let backup_path = backup.join(index.to_string());
+            copy_profile_tree(destination, &backup_path)?;
+        }
+    }
+    for (source, destination) in &copy_plan {
+        copy_profile_tree(source, destination)?;
+    }
+
+    let reload = Command::new("hyprctl").arg("reload").output();
+    let message = if reload
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    {
+        format!("Profile '{}' applied and Hyprland reloaded.", profile.name)
+    } else {
+        format!(
+            "Profile '{}' applied. Reload Hyprland manually if the changes are not visible.",
+            profile.name
+        )
+    };
+    Ok(message)
+}
+
 fn file_profile_name_from_url(url: &str) -> String {
     normalize_repo_url(url)
         .trim_end_matches('/')
@@ -995,7 +1263,18 @@ fn file_profile_name_from_url(url: &str) -> String {
 }
 
 fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &FileProfile) {
-    let repo_url = normalize_repo_url(&profile.repo_url);
+    let repo_url = match validate_repository_url(&profile.repo_url) {
+        Ok(url) => url,
+        Err(error) => {
+            show_message_dialog(
+                parent,
+                gtk::MessageType::Warning,
+                "Invalid Repository",
+                &error,
+            );
+            return;
+        }
+    };
     if repo_url.is_empty() {
         show_message_dialog(
             parent,
@@ -1054,7 +1333,7 @@ fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &F
                             .to_string()
                     })?;
                 let remote_branch = format!("origin/{branch}");
-                let mut command = Command::new("git");
+                let mut command = git_command();
                 command
                     .arg("-C")
                     .arg(&target_path)
@@ -1077,7 +1356,7 @@ fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &F
         }
     }
 
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command.arg("clone");
     if !version_ref.is_empty() {
         if let Err(error) = validate_version_ref(&version_ref) {
@@ -1093,14 +1372,17 @@ fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &F
     }
     command.arg("--").arg(&repo_url).arg(&install_path);
 
-    run_hyprland_command(
+    run_background_task(
         parent,
-        button,
+        Some(button),
         "Cloning dotfiles…",
-        command,
         "Dotfiles Installed",
         "The selected .file profile was installed successfully.",
         "Dotfiles Install Failed",
+        move || {
+            verify_repository_access(&repo_url)?;
+            command_result(command)
+        },
     );
 }
 
@@ -1113,6 +1395,30 @@ fn button_with_icon_label(icon_name: &str, text: &str) -> Button {
     inner.append(&label);
     button.set_child(Some(&inner));
     button
+}
+
+fn install_wallpaper_engine_css() {
+    let provider = CssProvider::new();
+    provider.load_from_data(
+        ".wallpaper-page { background-color: #17121f; }
+         .wallpaper-gallery, .wallpaper-details { border-radius: 10px; }
+         .wallpaper-card { border-radius: 10px; padding: 2px; }
+         .wallpaper-card-selected { border: 2px solid #e8a1b0; background-color: #8d536f; }
+         .wallpaper-chip { border-radius: 999px; padding-left: 14px; padding-right: 14px; }
+         .wallpaper-action { min-height: 42px; border-radius: 8px; }
+         .wallpaper-search { border-radius: 8px; }
+         .welcome-page { background-color: #17121f; }
+         .welcome-hero { border-radius: 14px; background-color: #2b1d32; border: 1px solid #67486f; }
+         .welcome-card { border-radius: 10px; background-color: #211827; border: 1px solid #3e2c47; }
+         .welcome-action { min-height: 42px; border-radius: 8px; }",
+    );
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -1310,6 +1616,7 @@ pub struct ConfigGUI {
 
 impl ConfigGUI {
     pub fn new(app: &Application) -> Self {
+        install_wallpaper_engine_css();
         let window = ApplicationWindow::builder()
             .application(app)
             .default_width(1280)
@@ -1381,8 +1688,12 @@ impl ConfigGUI {
         window.set_titlebar(Some(&header_bar));
 
         let main_box = Box::new(Orientation::Vertical, 0);
+        main_box.set_hexpand(true);
+        main_box.set_vexpand(true);
 
         let content_box = Box::new(Orientation::Horizontal, 0);
+        content_box.set_hexpand(true);
+        content_box.set_vexpand(true);
         main_box.append(&content_box);
 
         window.set_child(Some(&main_box));
@@ -1390,10 +1701,15 @@ impl ConfigGUI {
         let config_widgets = HashMap::new();
 
         let stack = Stack::new();
+        stack.set_hexpand(true);
+        stack.set_vexpand(true);
+        stack.set_size_request(0, -1);
 
         let sidebar = StackSidebar::new();
         sidebar.set_stack(&stack);
-        sidebar.set_width_request(200);
+        sidebar.set_hexpand(false);
+        sidebar.set_vexpand(true);
+        sidebar.set_size_request(200, -1);
 
         ConfigGUI {
             window,
@@ -1426,7 +1742,12 @@ impl ConfigGUI {
 
         self.sidebar = StackSidebar::new();
         self.sidebar.set_stack(&self.stack);
-        self.sidebar.set_width_request(200);
+        self.sidebar.set_hexpand(false);
+        self.sidebar.set_vexpand(true);
+        self.sidebar.set_size_request(200, -1);
+        self.stack.set_hexpand(true);
+        self.stack.set_vexpand(true);
+        self.stack.set_size_request(0, -1);
 
         self.content_box.append(&self.sidebar);
         self.content_box.append(&self.stack);
@@ -1447,13 +1768,42 @@ impl ConfigGUI {
         scrolled_window.set_hexpand(true);
 
         let container = Box::new(Orientation::Vertical, 14);
+        container.add_css_class("welcome-page");
         container.set_margin_top(16);
         container.set_margin_bottom(16);
         container.set_margin_start(16);
         container.set_margin_end(16);
 
-        let title_label = Label::new(Some("Setup Center"));
-        title_label.set_markup("<b>Setup Center</b>");
+        let hero = Frame::new(None);
+        hero.add_css_class("welcome-hero");
+        let hero_box = Box::new(Orientation::Vertical, 8);
+        hero_box.set_margin_top(22);
+        hero_box.set_margin_bottom(22);
+        hero_box.set_margin_start(22);
+        hero_box.set_margin_end(22);
+
+        let welcome_label = Label::new(Some("Welcome to HyprGUI"));
+        welcome_label.set_markup("<span size=\"xx-large\"><b>Welcome to HyprGUI</b></span>");
+        welcome_label.set_halign(gtk::Align::Start);
+
+        let intro_label = Label::new(Some(
+            "A calm starting point for building your Hyprland desktop. Pick a direction and make it yours.",
+        ));
+        intro_label.set_wrap(true);
+        intro_label.set_halign(gtk::Align::Start);
+        intro_label.set_opacity(0.86);
+
+        let status_label = Label::new(Some(note));
+        status_label.set_wrap(true);
+        status_label.set_halign(gtk::Align::Start);
+        status_label.set_opacity(0.72);
+        hero_box.append(&welcome_label);
+        hero_box.append(&intro_label);
+        hero_box.append(&status_label);
+        hero.set_child(Some(&hero_box));
+
+        let title_label = Label::new(Some("Your setup"));
+        title_label.set_markup("<b>Your setup</b>");
         title_label.set_halign(gtk::Align::Start);
 
         let note_label = Label::new(Some(note));
@@ -1461,23 +1811,70 @@ impl ConfigGUI {
         note_label.set_halign(gtk::Align::Start);
 
         let help_label = Label::new(Some(
-            "Use the pages in the sidebar to install Hyprland or prepare dotfiles from GitHub links.",
+            "Everything you need is in the sidebar. Start with a dotfile collection or install Hyprland first.",
         ));
         help_label.set_wrap(true);
         help_label.set_opacity(0.8);
         help_label.set_halign(gtk::Align::Start);
 
-        let origin_label = Label::new(Some(
-            "Personal rework of the original HyprGUI project by MarkusVolk: https://github.com/MarkusVolk/hyprgui",
-        ));
-        origin_label.set_wrap(true);
-        origin_label.set_opacity(0.72);
-        origin_label.set_halign(gtk::Align::Start);
+        let cards = Box::new(Orientation::Horizontal, 12);
+        cards.set_homogeneous(true);
+        for (heading, body) in [
+            (
+                "Dotfiles",
+                "Browse GitHub profiles, install them, and switch between your favourites.",
+            ),
+            (
+                "Hyprland",
+                "Install or update Hyprland and keep your version choices in one place.",
+            ),
+            (
+                "Configure",
+                "Fine-tune your desktop and save your changes when everything feels right.",
+            ),
+        ] {
+            let card = Frame::new(None);
+            card.add_css_class("welcome-card");
+            let card_box = Box::new(Orientation::Vertical, 6);
+            card_box.set_margin_top(14);
+            card_box.set_margin_bottom(14);
+            card_box.set_margin_start(14);
+            card_box.set_margin_end(14);
+            let card_title = Label::new(Some(heading));
+            card_title.set_markup(&format!("<b>{heading}</b>"));
+            card_title.set_halign(gtk::Align::Start);
+            let card_body = Label::new(Some(body));
+            card_body.set_wrap(true);
+            card_body.set_halign(gtk::Align::Start);
+            card_box.append(&card_title);
+            card_box.append(&card_body);
+            card.set_child(Some(&card_box));
+            cards.append(&card);
+        }
 
+        let action_row = Box::new(Orientation::Horizontal, 10);
+        let dotfiles_button = Button::with_label("Browse dotfiles");
+        dotfiles_button.add_css_class("welcome-action");
+        let install_button = Button::with_label("Open Hyprland setup");
+        install_button.add_css_class("welcome-action");
+        action_row.append(&dotfiles_button);
+        action_row.append(&install_button);
+
+        let stack_for_dotfiles = self.stack.clone();
+        dotfiles_button.connect_clicked(move |_| {
+            stack_for_dotfiles.set_visible_child_name("files");
+        });
+        let stack_for_install = self.stack.clone();
+        install_button.connect_clicked(move |_| {
+            stack_for_install.set_visible_child_name("hyprland-install");
+        });
+
+        container.append(&hero);
         container.append(&title_label);
-        container.append(&note_label);
         container.append(&help_label);
-        container.append(&origin_label);
+        container.append(&cards);
+        container.append(&action_row);
+        container.append(&note_label);
 
         scrolled_window.set_child(Some(&container));
         self.stack
@@ -1490,6 +1887,7 @@ impl ConfigGUI {
         scrolled_window.set_hexpand(true);
 
         let container = Box::new(Orientation::Vertical, 12);
+        container.add_css_class("wallpaper-page");
         container.set_margin_top(16);
         container.set_margin_bottom(16);
         container.set_margin_start(16);
@@ -1497,6 +1895,7 @@ impl ConfigGUI {
 
         let header_row = Box::new(Orientation::Horizontal, 10);
         let title_box = Box::new(Orientation::Vertical, 3);
+        title_box.set_hexpand(true);
         let title_label = Label::new(Some(".files"));
         title_label.set_markup("<b>.files</b>");
         title_label.set_halign(gtk::Align::Start);
@@ -1504,6 +1903,8 @@ impl ConfigGUI {
             "Browse, preview, and install dotfiles from Git repositories in one workspace.",
         ));
         description_label.set_halign(gtk::Align::Start);
+        description_label.set_wrap(true);
+        description_label.set_hexpand(true);
         description_label.set_opacity(0.75);
         title_box.append(&title_label);
         title_box.append(&description_label);
@@ -1521,9 +1922,13 @@ impl ConfigGUI {
 
         let search_row = Box::new(Orientation::Horizontal, 8);
         let search_entry = Entry::new();
+        search_entry.add_css_class("wallpaper-search");
         search_entry.set_hexpand(true);
         search_entry.set_placeholder_text(Some("Search .files by name or repository"));
-        search_entry.set_icon_from_icon_name(gtk::EntryIconPosition::Primary, Some("system-search-symbolic"));
+        search_entry.set_icon_from_icon_name(
+            gtk::EntryIconPosition::Primary,
+            Some("system-search-symbolic"),
+        );
         let clear_search_button = Button::from_icon_name("edit-clear-symbolic");
         clear_search_button.set_tooltip_text(Some("Clear search"));
         let sort_model = gtk::StringList::new(&["Selected first", "Name", "Repository"]);
@@ -1540,17 +1945,27 @@ impl ConfigGUI {
         let all_filter_button = Button::with_label("All");
         let installed_filter_button = Button::with_label("Installed");
         let missing_filter_button = Button::with_label("Not installed");
+        all_filter_button.add_css_class("wallpaper-chip");
+        installed_filter_button.add_css_class("wallpaper-chip");
+        missing_filter_button.add_css_class("wallpaper-chip");
+        all_filter_button.set_hexpand(true);
+        installed_filter_button.set_hexpand(true);
+        missing_filter_button.set_hexpand(true);
         filter_row.append(&filter_label);
         filter_row.append(&all_filter_button);
         filter_row.append(&installed_filter_button);
         filter_row.append(&missing_filter_button);
 
-        let body_row = Box::new(Orientation::Horizontal, 12);
+        let body_row = Paned::new(Orientation::Horizontal);
         body_row.set_hexpand(true);
         body_row.set_vexpand(true);
+        body_row.set_position(360);
+        body_row.set_wide_handle(true);
 
         let gallery_frame = Frame::new(Some("Dotfile profiles"));
+        gallery_frame.add_css_class("wallpaper-gallery");
         gallery_frame.set_hexpand(true);
+        gallery_frame.set_vexpand(true);
         gallery_frame.set_size_request(260, -1);
         let gallery_scroller = ScrolledWindow::new();
         gallery_scroller.set_vexpand(true);
@@ -1566,8 +1981,13 @@ impl ConfigGUI {
         gallery_frame.set_child(Some(&gallery_scroller));
 
         let detail_frame = Frame::new(Some("Profile details"));
-        detail_frame.set_size_request(330, -1);
+        detail_frame.add_css_class("wallpaper-details");
+        detail_frame.set_hexpand(true);
         detail_frame.set_vexpand(true);
+        let detail_scroller = ScrolledWindow::new();
+        detail_scroller.set_hexpand(true);
+        detail_scroller.set_vexpand(true);
+        detail_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         let detail_box = Box::new(Orientation::Vertical, 9);
         detail_box.set_margin_top(12);
         detail_box.set_margin_bottom(12);
@@ -1580,42 +2000,73 @@ impl ConfigGUI {
         let preview_title = Label::new(Some("No .file selected"));
         preview_title.set_markup("<b>No .file selected</b>");
         preview_title.set_halign(gtk::Align::Start);
-        let preview_label = Label::new(Some("Select a profile to inspect its files and install target."));
+        let preview_label = Label::new(Some(
+            "Select a profile to inspect its files and install target.",
+        ));
         preview_label.set_halign(gtk::Align::Start);
         preview_label.set_wrap(true);
         preview_label.set_selectable(true);
         preview_label.set_xalign(0.0);
         preview_label.set_yalign(0.0);
-        preview_label.set_size_request(-1, 170);
+        preview_label.set_size_request(-1, 96);
 
         let status_label = Label::new(Some("Status: -"));
         status_label.set_halign(gtk::Align::Start);
         let repo_label = Label::new(Some("Repository: -"));
         repo_label.set_halign(gtk::Align::Start);
         repo_label.set_wrap(true);
+        repo_label.set_wrap_mode(gtk::pango::WrapMode::Char);
+        repo_label.set_hexpand(true);
+        repo_label.set_xalign(0.0);
         repo_label.set_max_width_chars(42);
         repo_label.set_selectable(true);
         let path_label = Label::new(Some("Install path: -"));
         path_label.set_halign(gtk::Align::Start);
         path_label.set_wrap(true);
+        path_label.set_wrap_mode(gtk::pango::WrapMode::Char);
+        path_label.set_hexpand(true);
+        path_label.set_xalign(0.0);
         path_label.set_max_width_chars(42);
         let version_label = Label::new(Some("Branch / ref: latest"));
         version_label.set_halign(gtk::Align::Start);
         version_label.set_wrap(true);
+        version_label.set_wrap_mode(gtk::pango::WrapMode::Char);
+        version_label.set_hexpand(true);
+        version_label.set_xalign(0.0);
         version_label.set_max_width_chars(42);
         let notes_label = Label::new(Some("Notes: -"));
         notes_label.set_halign(gtk::Align::Start);
         notes_label.set_wrap(true);
+        notes_label.set_wrap_mode(gtk::pango::WrapMode::Char);
+        notes_label.set_hexpand(true);
+        notes_label.set_xalign(0.0);
         notes_label.set_max_width_chars(42);
         notes_label.set_opacity(0.8);
 
         let open_profile_button = Button::with_label("Open repository");
-        open_profile_button.set_tooltip_text(Some("Open the selected repository in the default browser"));
+        open_profile_button
+            .set_tooltip_text(Some("Open the selected repository in the default browser"));
+        let apply_profile_button = Button::with_label("Apply profile");
+        apply_profile_button.set_tooltip_text(Some(
+            "Copy this profile's Hyprland files into the active configuration and reload Hyprland",
+        ));
+        apply_profile_button.add_css_class("suggested-action");
         let run_command_button = Button::with_label("Install / Update");
-        run_command_button.set_tooltip_text(Some("Clone a new profile or fast-forward an installed profile"));
+        run_command_button.set_tooltip_text(Some(
+            "Clone a new profile or fast-forward an installed profile",
+        ));
         run_command_button.add_css_class("suggested-action");
         let remove_profile_button = Button::with_label("Remove from library");
-        remove_profile_button.set_tooltip_text(Some("Remove the saved profile without deleting its files"));
+        remove_profile_button
+            .set_tooltip_text(Some("Remove the saved profile without deleting its files"));
+        open_profile_button.set_hexpand(true);
+        apply_profile_button.set_hexpand(true);
+        run_command_button.set_hexpand(true);
+        remove_profile_button.set_hexpand(true);
+        open_profile_button.add_css_class("wallpaper-action");
+        apply_profile_button.add_css_class("wallpaper-action");
+        run_command_button.add_css_class("wallpaper-action");
+        remove_profile_button.add_css_class("wallpaper-action");
 
         detail_box.append(&preview_heading);
         detail_box.append(&preview_title);
@@ -1628,12 +2079,14 @@ impl ConfigGUI {
         detail_box.append(&notes_label);
         detail_box.append(&Separator::new(Orientation::Horizontal));
         detail_box.append(&open_profile_button);
+        detail_box.append(&apply_profile_button);
         detail_box.append(&run_command_button);
         detail_box.append(&remove_profile_button);
-        detail_frame.set_child(Some(&detail_box));
+        detail_scroller.set_child(Some(&detail_box));
+        detail_frame.set_child(Some(&detail_scroller));
 
-        body_row.append(&gallery_frame);
-        body_row.append(&detail_frame);
+        body_row.set_start_child(Some(&gallery_frame));
+        body_row.set_end_child(Some(&detail_frame));
 
         let quick_install_frame = Frame::new(Some("Install another repository"));
         let quick_install_box = Box::new(Orientation::Vertical, 8);
@@ -1670,18 +2123,21 @@ impl ConfigGUI {
             let version_label = version_label.clone();
             let notes_label = notes_label.clone();
             let open_profile_button = open_profile_button.clone();
+            let apply_profile_button = apply_profile_button.clone();
             let run_command_button = run_command_button.clone();
             let remove_profile_button = remove_profile_button.clone();
             Rc::new(move |profile| {
                 let Some(profile) = profile else {
                     preview_title.set_markup("<b>No .file selected</b>");
-                    preview_label.set_text("Select a profile to inspect its files and install target.");
+                    preview_label
+                        .set_text("Select a profile to inspect its files and install target.");
                     status_label.set_text("Status: -");
                     repo_label.set_text("Repository: -");
                     path_label.set_text("Install path: -");
                     version_label.set_text("Branch / ref: latest");
                     notes_label.set_text("Notes: -");
                     open_profile_button.set_sensitive(false);
+                    apply_profile_button.set_sensitive(false);
                     run_command_button.set_sensitive(false);
                     remove_profile_button.set_sensitive(false);
                     return;
@@ -1709,6 +2165,7 @@ impl ConfigGUI {
                 };
                 notes_label.set_text(&notes_text);
                 open_profile_button.set_sensitive(true);
+                apply_profile_button.set_sensitive(file_profile_is_installed(&profile));
                 run_command_button.set_sensitive(true);
                 remove_profile_button.set_sensitive(true);
                 run_command_button.set_label(if file_profile_is_installed(&profile) {
@@ -1766,12 +2223,13 @@ impl ConfigGUI {
                 let mut selected_profile = None;
                 for (index, profile) in profiles.iter().enumerate() {
                     let card = Button::new();
+                    card.add_css_class("wallpaper-card");
                     card.set_hexpand(true);
                     card.set_vexpand(false);
                     card.set_size_request(220, 150);
                     card.set_tooltip_text(Some("Select this profile to inspect and install it"));
                     if selected.as_deref() == Some(profile.name.as_str()) {
-                        card.add_css_class("suggested-action");
+                        card.add_css_class("wallpaper-card-selected");
                         selected_profile = Some(profile.clone());
                     }
 
@@ -1789,7 +2247,10 @@ impl ConfigGUI {
                     preview.set_max_width_chars(30);
                     preview.set_size_request(-1, 82);
                     let name = Label::new(Some(&profile.name));
-                    name.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(&profile.name)));
+                    name.set_markup(&format!(
+                        "<b>{}</b>",
+                        glib::markup_escape_text(&profile.name)
+                    ));
                     name.set_halign(gtk::Align::Start);
                     let status = Label::new(Some(file_profile_status(profile)));
                     status.set_halign(gtk::Align::Start);
@@ -1889,7 +2350,10 @@ impl ConfigGUI {
                     Some("Add .file profile"),
                     Some(&parent),
                     gtk::DialogFlags::MODAL,
-                    &[("Cancel", gtk::ResponseType::Cancel), ("Add", gtk::ResponseType::Accept)],
+                    &[
+                        ("Cancel", gtk::ResponseType::Cancel),
+                        ("Add", gtk::ResponseType::Accept),
+                    ],
                 );
                 let content = dialog.content_area();
                 content.set_spacing(8);
@@ -1927,7 +2391,19 @@ impl ConfigGUI {
                         notes: notes_entry.text().trim().to_string(),
                     };
                     if profile.name.is_empty() || profile.repo_url.is_empty() {
-                        show_message_dialog(&parent, gtk::MessageType::Warning, "Missing data", "A profile name and repository URL are required.");
+                        show_message_dialog(
+                            &parent,
+                            gtk::MessageType::Warning,
+                            "Missing data",
+                            "A profile name and repository URL are required.",
+                        );
+                    } else if let Err(error) = validate_repository_url(&profile.repo_url) {
+                        show_message_dialog(
+                            &parent,
+                            gtk::MessageType::Warning,
+                            "Invalid Repository",
+                            &error,
+                        );
                     } else {
                         *selected_for_add.borrow_mut() = Some(profile.name.clone());
                         {
@@ -1950,9 +2426,48 @@ impl ConfigGUI {
         open_profile_button.connect_clicked(move |_| {
             let selected = selected_for_open.borrow().clone();
             let store = store_for_open.borrow();
-            if let Some(profile) = selected.and_then(|name| store.profiles.iter().find(|item| item.name == name).cloned()) {
+            if let Some(profile) = selected.and_then(|name| {
+                store
+                    .profiles
+                    .iter()
+                    .find(|item| item.name == name)
+                    .cloned()
+            }) {
                 open_uri(&parent, &profile.repo_url);
             }
+        });
+
+        let parent = self.window.clone();
+        let store_for_apply = self.file_profiles.clone();
+        let selected_for_apply = selected_name.clone();
+        apply_profile_button.connect_clicked(move |button| {
+            let Some(selected) = selected_for_apply.borrow().clone() else {
+                show_message_dialog(
+                    &parent,
+                    gtk::MessageType::Warning,
+                    "Nothing selected",
+                    "Select a profile first.",
+                );
+                return;
+            };
+            let Some(profile) = store_for_apply
+                .borrow()
+                .profiles
+                .iter()
+                .find(|item| item.name == selected)
+                .cloned()
+            else {
+                return;
+            };
+            run_background_task(
+                &parent,
+                Some(button),
+                "Applying profile…",
+                "Profile Applied",
+                "The selected profile is now active.",
+                "Profile Apply Failed",
+                move || apply_file_profile(&profile).map(|_| ()),
+            );
         });
 
         let parent = self.window.clone();
@@ -1961,7 +2476,13 @@ impl ConfigGUI {
         run_command_button.connect_clicked(move |button| {
             let selected = selected_for_run.borrow().clone();
             let store = store_for_run.borrow();
-            if let Some(profile) = selected.and_then(|name| store.profiles.iter().find(|item| item.name == name).cloned()) {
+            if let Some(profile) = selected.and_then(|name| {
+                store
+                    .profiles
+                    .iter()
+                    .find(|item| item.name == name)
+                    .cloned()
+            }) {
                 install_file_profile(&parent, button, &profile);
             }
         });
@@ -1972,7 +2493,12 @@ impl ConfigGUI {
         let refresh_for_remove = refresh_ui.clone();
         remove_profile_button.connect_clicked(move |_| {
             let Some(selected) = selected_for_remove.borrow().clone() else {
-                show_message_dialog(&parent, gtk::MessageType::Warning, "Nothing selected", "Select a profile first.");
+                show_message_dialog(
+                    &parent,
+                    gtk::MessageType::Warning,
+                    "Nothing selected",
+                    "Select a profile first.",
+                );
                 return;
             };
             {
@@ -1992,7 +2518,21 @@ impl ConfigGUI {
         quick_install_button.connect_clicked(move |button| {
             let repo_url = quick_repo_entry.text().trim().to_string();
             if repo_url.is_empty() {
-                show_message_dialog(&parent, gtk::MessageType::Warning, "Missing repository", "Paste a repository URL before installing.");
+                show_message_dialog(
+                    &parent,
+                    gtk::MessageType::Warning,
+                    "Missing repository",
+                    "Paste a repository URL before installing.",
+                );
+                return;
+            }
+            if let Err(error) = validate_repository_url(&repo_url) {
+                show_message_dialog(
+                    &parent,
+                    gtk::MessageType::Warning,
+                    "Invalid Repository",
+                    &error,
+                );
                 return;
             }
             let profile = FileProfile {
@@ -2004,7 +2544,10 @@ impl ConfigGUI {
             };
             {
                 let mut store = store_for_quick.borrow_mut();
-                store.profiles.retain(|item| normalize_git_remote_identity(&item.repo_url) != normalize_git_remote_identity(&profile.repo_url));
+                store.profiles.retain(|item| {
+                    normalize_git_remote_identity(&item.repo_url)
+                        != normalize_git_remote_identity(&profile.repo_url)
+                });
                 store.selected = Some(profile.name.clone());
                 store.profiles.push(profile.clone());
                 save_file_profile_store(&store);
@@ -2023,7 +2566,8 @@ impl ConfigGUI {
         container.append(&body_row);
         container.append(&quick_install_frame);
         scrolled_window.set_child(Some(&container));
-        self.stack.add_titled(&scrolled_window, Some("files"), ".files");
+        self.stack
+            .add_titled(&scrolled_window, Some("files"), ".files");
         refresh_ui();
     }
 
@@ -2046,6 +2590,7 @@ impl ConfigGUI {
             "Use the buttons below to install or update Hyprland. The GUI detects your Linux distribution and runs the matching package-manager action automatically. Leave the version fields empty for the latest release, or enter a branch, tag, commit SHA, or NixOS flake ref to pin a specific version.",
         ));
         description_label.set_wrap(true);
+        description_label.set_hexpand(true);
         description_label.set_halign(gtk::Align::Start);
         description_label.set_opacity(0.8);
 
@@ -2097,7 +2642,11 @@ impl ConfigGUI {
             update_software_from_github(&parent, button, version_ref.as_deref());
         });
 
-        let button_row = Box::new(Orientation::Horizontal, 10);
+        let button_row = Box::new(Orientation::Vertical, 10);
+        button_row.set_hexpand(true);
+        install_hyprland_button.set_hexpand(true);
+        update_hyprland_button.set_hexpand(true);
+        update_software_button.set_hexpand(true);
         button_row.append(&install_hyprland_button);
         button_row.append(&update_hyprland_button);
         button_row.append(&update_software_button);
@@ -4408,6 +4957,8 @@ impl ConfigWidget {
 
         let title_label = Label::new(Some(title));
         let desc_label = Label::new(Some(description));
+        desc_label.set_wrap(true);
+        desc_label.set_hexpand(true);
 
         if *first_section.borrow() {
             title_label.set_halign(gtk::Align::Center);
@@ -4451,6 +5002,9 @@ impl ConfigWidget {
 
         let label_widget = Label::new(Some(label));
         label_widget.set_halign(gtk::Align::Start);
+        label_widget.set_wrap(true);
+        label_widget.set_hexpand(true);
+        label_widget.set_xalign(0.0);
 
         let tooltip_button = Button::new();
         let question_mark_icon = icon_image("dialog-question-symbolic");
@@ -4463,6 +5017,8 @@ impl ConfigWidget {
         description_label.set_margin_bottom(5);
         description_label.set_margin_start(5);
         description_label.set_margin_end(5);
+        description_label.set_wrap(true);
+        description_label.set_max_width_chars(56);
         popover.set_child(Some(&description_label));
         popover.set_position(gtk::PositionType::Right);
 
@@ -4506,6 +5062,9 @@ impl ConfigWidget {
 
         let label_widget = Label::new(Some(label));
         label_widget.set_halign(gtk::Align::Start);
+        label_widget.set_wrap(true);
+        label_widget.set_hexpand(true);
+        label_widget.set_xalign(0.0);
 
         let tooltip_button = Button::new();
         let question_mark_icon = icon_image("dialog-question-symbolic");
@@ -4518,6 +5077,8 @@ impl ConfigWidget {
         description_label.set_margin_bottom(5);
         description_label.set_margin_start(5);
         description_label.set_margin_end(5);
+        description_label.set_wrap(true);
+        description_label.set_max_width_chars(56);
         popover.set_child(Some(&description_label));
         popover.set_position(gtk::PositionType::Right);
 
@@ -4559,6 +5120,9 @@ impl ConfigWidget {
 
         let label_widget = Label::new(Some(label));
         label_widget.set_halign(gtk::Align::Start);
+        label_widget.set_wrap(true);
+        label_widget.set_hexpand(true);
+        label_widget.set_xalign(0.0);
 
         let tooltip_button = Button::new();
         let question_mark_icon = icon_image("dialog-question-symbolic");
@@ -4571,6 +5135,8 @@ impl ConfigWidget {
         description_label.set_margin_bottom(5);
         description_label.set_margin_start(5);
         description_label.set_margin_end(5);
+        description_label.set_wrap(true);
+        description_label.set_max_width_chars(56);
         popover.set_child(Some(&description_label));
         popover.set_position(gtk::PositionType::Right);
 
@@ -4614,6 +5180,9 @@ impl ConfigWidget {
 
         let label_widget = Label::new(Some(label));
         label_widget.set_halign(gtk::Align::Start);
+        label_widget.set_wrap(true);
+        label_widget.set_hexpand(true);
+        label_widget.set_xalign(0.0);
 
         let tooltip_button = Button::new();
         let question_mark_icon = icon_image("dialog-question-symbolic");
@@ -4626,6 +5195,8 @@ impl ConfigWidget {
         description_label.set_margin_bottom(5);
         description_label.set_margin_start(5);
         description_label.set_margin_end(5);
+        description_label.set_wrap(true);
+        description_label.set_max_width_chars(56);
         popover.set_child(Some(&description_label));
         popover.set_position(gtk::PositionType::Right);
 
@@ -4667,6 +5238,9 @@ impl ConfigWidget {
 
         let label_widget = Label::new(Some(label));
         label_widget.set_halign(gtk::Align::Start);
+        label_widget.set_wrap(true);
+        label_widget.set_hexpand(true);
+        label_widget.set_xalign(0.0);
 
         let tooltip_button = Button::new();
         let question_mark_icon = icon_image("dialog-question-symbolic");
@@ -4679,6 +5253,8 @@ impl ConfigWidget {
         description_label.set_margin_bottom(5);
         description_label.set_margin_start(5);
         description_label.set_margin_end(5);
+        description_label.set_wrap(true);
+        description_label.set_max_width_chars(56);
         popover.set_child(Some(&description_label));
         popover.set_position(gtk::PositionType::Right);
 
@@ -4809,7 +5385,7 @@ impl ConfigWidget {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_git_remote_identity, validate_version_ref};
+    use super::{normalize_git_remote_identity, validate_repository_url, validate_version_ref};
 
     #[test]
     fn normalizes_common_github_remote_forms() {
@@ -4841,5 +5417,16 @@ mod tests {
         assert!(validate_version_ref("feature branch").is_err());
         assert!(validate_version_ref("main").is_ok());
         assert!(validate_version_ref("v0.1.4").is_ok());
+    }
+
+    #[test]
+    fn validates_clone_urls_and_rejects_redirect_links() {
+        assert!(validate_repository_url("https://github.com/example/dotfiles.git").is_ok());
+        assert!(validate_repository_url("git@github.com:example/dotfiles.git").is_ok());
+        assert!(validate_repository_url(
+            "https://www.youtube.com/redirect?event=video_description&q=https://github.com/example/dotfiles"
+        )
+        .is_err());
+        assert!(validate_repository_url("https://github.com/example").is_err());
     }
 }
