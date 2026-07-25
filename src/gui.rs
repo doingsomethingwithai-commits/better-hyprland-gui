@@ -2814,6 +2814,8 @@ impl ConfigGUI {
             else {
                 return;
             };
+            let refresh_after_apply = refresh_for_apply.clone();
+            let success_parent = success_parent_for_apply.clone();
             run_background_task_with_completion(
                 &parent,
                 Some(button),
@@ -2822,9 +2824,9 @@ impl ConfigGUI {
                 "The selected profile is now active.",
                 "Profile Apply Failed",
                 Some(std::boxed::Box::new(move || {
-                    refresh_for_apply();
+                    refresh_after_apply();
                     show_install_result(
-                        &success_parent_for_apply,
+                        &success_parent,
                         "Profile Applied",
                         true,
                         "The selected profile is now active.",
