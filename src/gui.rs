@@ -137,12 +137,6 @@ fn open_uri(parent: &ApplicationWindow, uri: &str) {
     }
 }
 
-fn copy_text_to_clipboard(text: &str) {
-    if let Some(display) = gdk::Display::default() {
-        display.clipboard().set_text(text);
-    }
-}
-
 fn distro_id() -> String {
     if let Ok(content) = fs::read_to_string("/etc/os-release") {
         for line in content.lines() {
@@ -450,6 +444,8 @@ fn update_repo_checkout(repo_dir: &Path) -> Result<(), String> {
 
 fn run_background_task<F>(
     parent: &ApplicationWindow,
+    button: Option<&Button>,
+    running_label: &str,
     success_title: &str,
     success_message: &str,
     failure_title: &str,
@@ -457,6 +453,13 @@ fn run_background_task<F>(
 ) where
     F: FnOnce() -> Result<(), String> + Send + 'static,
 {
+    let button_state = button.map(|button| {
+        let original_label = button.label().map(|label| label.to_string());
+        button.set_sensitive(false);
+        button.set_label(running_label);
+        (button.clone(), original_label)
+    });
+
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let _ = sender.send(task());
@@ -470,15 +473,18 @@ fn run_background_task<F>(
     glib::timeout_add_local(Duration::from_millis(100), move || {
         match receiver.try_recv() {
             Ok(Ok(())) => {
+                restore_task_button(&button_state);
                 show_install_result(&parent, &success_title, true, &success_message);
                 glib::ControlFlow::Break
             }
             Ok(Err(error)) => {
+                restore_task_button(&button_state);
                 show_install_result(&parent, &failure_title, false, &error);
                 glib::ControlFlow::Break
             }
             Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
             Err(mpsc::TryRecvError::Disconnected) => {
+                restore_task_button(&button_state);
                 show_install_result(
                     &parent,
                     &failure_title,
@@ -489,6 +495,15 @@ fn run_background_task<F>(
             }
         }
     });
+}
+
+fn restore_task_button(button_state: &Option<(Button, Option<String>)>) {
+    if let Some((button, original_label)) = button_state {
+        if let Some(label) = original_label {
+            button.set_label(label);
+        }
+        button.set_sensitive(true);
+    }
 }
 
 fn command_result(mut command: Command) -> Result<(), String> {
@@ -519,7 +534,11 @@ fn rebuild_software_from_repo(repo_dir: &Path) -> Result<(), String> {
     command_result(cargo_command).map_err(|error| format!("The rebuild failed.\n\n{error}"))
 }
 
-fn update_software_from_github(parent: &ApplicationWindow, version_ref: Option<&str>) {
+fn update_software_from_github(
+    parent: &ApplicationWindow,
+    button: &Button,
+    version_ref: Option<&str>,
+) {
     let Some(repo_dir) = software_repo_dir() else {
         show_message_dialog(
             parent,
@@ -537,6 +556,8 @@ fn update_software_from_github(parent: &ApplicationWindow, version_ref: Option<&
 
     run_background_task(
         parent,
+        Some(button),
+        "Updating software…",
         "Software Updated",
         "The GUI repository was updated and rebuilt successfully. Restart the application to use the latest version.",
         "Software Update Failed",
@@ -555,6 +576,8 @@ fn update_software_from_github(parent: &ApplicationWindow, version_ref: Option<&
 
 fn run_hyprland_command(
     parent: &ApplicationWindow,
+    button: &Button,
+    running_label: &str,
     command: Command,
     success_title: &str,
     success_message: &str,
@@ -562,6 +585,8 @@ fn run_hyprland_command(
 ) {
     run_background_task(
         parent,
+        Some(button),
+        running_label,
         success_title,
         success_message,
         failure_title,
@@ -577,7 +602,11 @@ fn nix_flake_ref_for_hyprland(version_ref: Option<&str>) -> String {
     }
 }
 
-fn install_hyprland_from_gui(parent: &ApplicationWindow, version_ref: Option<&str>) {
+fn install_hyprland_from_gui(
+    parent: &ApplicationWindow,
+    button: &Button,
+    version_ref: Option<&str>,
+) {
     let distro = distro_id();
     let command = match distro.as_str() {
         "arch" | "manjaro" | "endeavouros" | "athena" | "athenaos" => {
@@ -616,6 +645,8 @@ fn install_hyprland_from_gui(parent: &ApplicationWindow, version_ref: Option<&st
 
     run_hyprland_command(
         parent,
+        button,
+        "Installing Hyprland…",
         command,
         "Hyprland Installed",
         "Hyprland installation finished successfully. Log out and select the Hyprland session if needed.",
@@ -623,7 +654,11 @@ fn install_hyprland_from_gui(parent: &ApplicationWindow, version_ref: Option<&st
     );
 }
 
-fn update_hyprland_from_gui(parent: &ApplicationWindow, version_ref: Option<&str>) {
+fn update_hyprland_from_gui(
+    parent: &ApplicationWindow,
+    button: &Button,
+    version_ref: Option<&str>,
+) {
     let distro = distro_id();
     let command = match distro.as_str() {
         "arch" | "manjaro" | "endeavouros" | "athena" | "athenaos" => {
@@ -666,6 +701,8 @@ fn update_hyprland_from_gui(parent: &ApplicationWindow, version_ref: Option<&str
 
     run_hyprland_command(
         parent,
+        button,
+        "Updating Hyprland…",
         command,
         "Hyprland Updated",
         "Hyprland update finished successfully. Restart or log out if the new version requires it.",
@@ -827,7 +864,7 @@ fn file_profile_clone_command(profile: &FileProfile) -> String {
     }
 }
 
-fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
+fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &FileProfile) {
     let repo_url = normalize_repo_url(&profile.repo_url);
     if repo_url.is_empty() {
         show_message_dialog(
@@ -870,6 +907,8 @@ fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
     if target_path.join(".git").exists() {
         run_background_task(
             parent,
+            Some(button),
+            "Updating dotfiles…",
             "Dotfiles Updated",
             "The selected .file profile was updated successfully.",
             "Dotfiles Update Failed",
@@ -926,10 +965,12 @@ fn install_file_profile(parent: &ApplicationWindow, profile: &FileProfile) {
         }
         command.args(["--branch", &version_ref]);
     }
-    command.arg(&repo_url).arg(&install_path);
+    command.arg("--").arg(&repo_url).arg(&install_path);
 
     run_hyprland_command(
         parent,
+        button,
+        "Cloning dotfiles…",
         command,
         "Dotfiles Installed",
         "The selected .file profile was installed successfully.",
@@ -985,7 +1026,7 @@ fn spotlight_steps() -> Vec<SpotlightStep> {
         SpotlightStep {
             title: "Dotfiles",
             target: "Dotfiles page",
-            body: "Paste a GitHub link for your dotfiles, open it directly, or copy a clone command to start the setup flow.",
+            body: "Paste a GitHub link for your dotfiles, open it directly, or clone it in the background to start the setup flow.",
             tip: "This is the easiest way to bootstrap a config repository.",
         },
         SpotlightStep {
@@ -1339,8 +1380,7 @@ impl ConfigGUI {
 
         let add_profile_button = button_with_icon_label("list-add-symbolic", "Add .file");
         let open_profile_button = Button::with_label("Open Selected Repo");
-        let install_profile_button = Button::with_label("Install / Update Selected");
-        let copy_command_button = Button::with_label("Copy Clone Command");
+        let run_command_button = Button::with_label("Run Clone / Update");
         let remove_profile_button = Button::with_label("Remove Selected");
 
         let body_row = Box::new(Orientation::Horizontal, 14);
@@ -1421,8 +1461,7 @@ impl ConfigGUI {
         let preview_command_for_refresh = preview_command.clone();
         let preview_notes_for_refresh = preview_notes.clone();
         let open_profile_button_for_refresh = open_profile_button.clone();
-        let install_profile_button_for_refresh = install_profile_button.clone();
-        let copy_command_button_for_refresh = copy_command_button.clone();
+        let run_command_button_for_refresh = run_command_button.clone();
         let remove_profile_button_for_refresh = remove_profile_button.clone();
         let initial_selected_name = self.file_profiles.borrow().selected.clone();
         let selected_name_for_refresh = Rc::new(RefCell::new(initial_selected_name));
@@ -1496,8 +1535,7 @@ impl ConfigGUI {
 
             let has_profile = !profiles.is_empty();
             open_profile_button_for_refresh.set_sensitive(has_profile);
-            install_profile_button_for_refresh.set_sensitive(has_profile);
-            copy_command_button_for_refresh.set_sensitive(has_profile);
+            run_command_button_for_refresh.set_sensitive(has_profile);
             remove_profile_button_for_refresh.set_sensitive(has_profile);
         });
 
@@ -1669,42 +1707,17 @@ impl ConfigGUI {
         });
 
         let parent = self.window.clone();
-        let store_for_copy = self.file_profiles.clone();
-        let selected_name_for_copy = selected_name_for_refresh.clone();
-        copy_command_button.connect_clicked(move |_| {
-            let store = store_for_copy.borrow();
-            if let Some(profile) = selected_name_for_copy.borrow().as_ref().and_then(|wanted| {
+        let store_for_run = self.file_profiles.clone();
+        let selected_name_for_run = selected_name_for_refresh.clone();
+        run_command_button.connect_clicked(move |button| {
+            let store = store_for_run.borrow();
+            if let Some(profile) = selected_name_for_run.borrow().as_ref().and_then(|wanted| {
                 store
                     .profiles
                     .iter()
                     .find(|profile| &profile.name == wanted)
             }) {
-                copy_text_to_clipboard(&file_profile_clone_command(profile));
-                show_message_dialog(
-                    &parent,
-                    gtk::MessageType::Info,
-                    "Copied",
-                    "The clone command for the selected profile has been copied to the clipboard.",
-                );
-            }
-        });
-
-        let parent = self.window.clone();
-        let store_for_install = self.file_profiles.clone();
-        let selected_name_for_install = selected_name_for_refresh.clone();
-        install_profile_button.connect_clicked(move |_| {
-            let store = store_for_install.borrow();
-            if let Some(profile) = selected_name_for_install
-                .borrow()
-                .as_ref()
-                .and_then(|wanted| {
-                    store
-                        .profiles
-                        .iter()
-                        .find(|profile| &profile.name == wanted)
-                })
-            {
-                install_file_profile(&parent, profile);
+                install_file_profile(&parent, button, profile);
             }
         });
 
@@ -1736,8 +1749,7 @@ impl ConfigGUI {
         let button_row = Box::new(Orientation::Horizontal, 10);
         button_row.append(&add_profile_button);
         button_row.append(&open_profile_button);
-        button_row.append(&install_profile_button);
-        button_row.append(&copy_command_button);
+        button_row.append(&run_command_button);
         button_row.append(&remove_profile_button);
 
         container.append(&title_label);
@@ -1770,7 +1782,7 @@ impl ConfigGUI {
         title_label.set_halign(gtk::Align::Start);
 
         let description_label = Label::new(Some(
-            "Paste a GitHub repository link for your dotfiles, then open the repo or copy a starter clone command.",
+            "Paste a GitHub repository link for your dotfiles, then open the repo or clone it directly in the background.",
         ));
         description_label.set_wrap(true);
         description_label.set_halign(gtk::Align::Start);
@@ -1872,7 +1884,7 @@ impl ConfigGUI {
 
         let button_row = Box::new(Orientation::Horizontal, 10);
         let open_button = Button::with_label("Open GitHub Link");
-        let copy_button = Button::with_label("Copy git clone Command");
+        let run_button = Button::with_label("Clone in Background");
 
         let parent = self.window.clone();
         let entry_for_open = entry.clone();
@@ -1882,9 +1894,9 @@ impl ConfigGUI {
         });
 
         let parent = self.window.clone();
-        let entry_for_copy = entry.clone();
-        copy_button.connect_clicked(move |_| {
-            let url = entry_for_copy.text().trim().to_string();
+        let entry_for_run = entry.clone();
+        run_button.connect_clicked(move |button| {
+            let url = entry_for_run.text().trim().to_string();
 
             if url.is_empty() {
                 show_message_dialog(
@@ -1896,21 +1908,21 @@ impl ConfigGUI {
                 return;
             }
 
-            let command = format!("git clone {} ~/dotfiles", url);
-            copy_text_to_clipboard(&command);
-            show_message_dialog(
-                &parent,
-                gtk::MessageType::Info,
-                "Copied",
-                "The clone command has been copied to the clipboard.",
-            );
+            let profile = FileProfile {
+                name: "Dotfiles".to_string(),
+                repo_url: url,
+                install_path: "~/dotfiles".to_string(),
+                version_ref: String::new(),
+                notes: String::new(),
+            };
+            install_file_profile(&parent, button, &profile);
         });
 
         button_row.append(&open_button);
-        button_row.append(&copy_button);
+        button_row.append(&run_button);
 
         let hint_label = Label::new(Some(
-            "Tip: if the repository includes an install script, follow the project README after cloning.",
+            "The repository is cloned to ~/dotfiles in the background. If it includes an install script, review the project README before running it.",
         ));
         hint_label.set_wrap(true);
         hint_label.set_halign(gtk::Align::Start);
@@ -1979,23 +1991,23 @@ impl ConfigGUI {
 
         let parent = self.window.clone();
         let hyprland_version_for_install = hyprland_version_entry.clone();
-        install_hyprland_button.connect_clicked(move |_| {
+        install_hyprland_button.connect_clicked(move |button| {
             let version_ref = entry_text_or_none(&hyprland_version_for_install);
-            install_hyprland_from_gui(&parent, version_ref.as_deref());
+            install_hyprland_from_gui(&parent, button, version_ref.as_deref());
         });
 
         let parent = self.window.clone();
         let hyprland_version_for_update = hyprland_version_entry.clone();
-        update_hyprland_button.connect_clicked(move |_| {
+        update_hyprland_button.connect_clicked(move |button| {
             let version_ref = entry_text_or_none(&hyprland_version_for_update);
-            update_hyprland_from_gui(&parent, version_ref.as_deref());
+            update_hyprland_from_gui(&parent, button, version_ref.as_deref());
         });
 
         let parent = self.window.clone();
         let software_version_for_update = software_version_entry.clone();
-        update_software_button.connect_clicked(move |_| {
+        update_software_button.connect_clicked(move |button| {
             let version_ref = entry_text_or_none(&software_version_for_update);
-            update_software_from_github(&parent, version_ref.as_deref());
+            update_software_from_github(&parent, button, version_ref.as_deref());
         });
 
         let button_row = Box::new(Orientation::Horizontal, 10);
