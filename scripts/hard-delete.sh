@@ -2,6 +2,8 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-$HOME/.local/share/better-hyprland-gui}"
+DESKTOP_FILE="$HOME/.local/share/applications/better-hyprland-gui.desktop"
+INSTALL_STATE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/hyprgui/install.env"
 
 log() {
   printf '%s\n' "$*"
@@ -52,6 +54,11 @@ if [[ ! -e "$TARGET_DIR" ]]; then
   exit 0
 fi
 
+if [[ -L "$TARGET_DIR" ]]; then
+  log "Refusing to delete a symlinked checkout: $TARGET_DIR"
+  exit 1
+fi
+
 if command -v realpath >/dev/null 2>&1; then
   TARGET_DIR="$(realpath "$TARGET_DIR")"
   HOME_DIR="$(realpath "$HOME")"
@@ -79,4 +86,10 @@ if ! grep -Eq '^[[:space:]]*name[[:space:]]*=[[:space:]]*"hyprgui"[[:space:]]*$'
 fi
 
 rm -rf -- "$TARGET_DIR"
+if [[ -f "$DESKTOP_FILE" ]] && grep -Fq "$TARGET_DIR" "$DESKTOP_FILE"; then
+  rm -f -- "$DESKTOP_FILE"
+fi
+if [[ -f "$INSTALL_STATE_FILE" ]] && grep -Fq "$TARGET_DIR" "$INSTALL_STATE_FILE"; then
+  rm -f -- "$INSTALL_STATE_FILE"
+fi
 log "Deleted $TARGET_DIR"

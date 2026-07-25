@@ -654,7 +654,15 @@ fn command_result(mut command: Command) -> Result<(), String> {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let lowercase_stderr = stderr.to_lowercase();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let details = if stderr.trim().is_empty() {
+            stdout
+        } else if stdout.trim().is_empty() {
+            stderr.clone()
+        } else {
+            format!("{stderr}\n{stdout}")
+        };
+        let lowercase_stderr = details.to_lowercase();
         if lowercase_stderr.contains("db.lck")
             || lowercase_stderr.contains("unable to lock database")
             || lowercase_stderr.contains("could not lock database")
@@ -666,7 +674,7 @@ fn command_result(mut command: Command) -> Result<(), String> {
             );
         }
 
-        Err(format!("The command failed.\n\n{}", stderr))
+        Err(format!("The command failed.\n\n{details}"))
     }
 }
 
@@ -694,25 +702,34 @@ fn restart_updated_application(parent: &ApplicationWindow, repo_dir: &Path) -> R
 
     let old_pid = std::process::id().to_string();
     let binary_path = binary_path.to_string_lossy().into_owned();
-    let unit_name = format!("hyprgui-restart-{old_pid}");
-    let restart_script = "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec \"$2\"";
-    Command::new("/usr/bin/systemd-run")
-        .args([
-            "--user",
-            "--quiet",
-            "--collect",
-            &format!("--unit={unit_name}"),
-            &format!("--setenv=APP_DIR={}", repo_dir.display()),
-            &format!("--setenv=HYPRGUI_REPO_DIR={}", repo_dir.display()),
-            "/bin/sh",
-            "-c",
-            restart_script,
-            "hyprgui-restart",
-            &old_pid,
-            &binary_path,
-        ])
-        .spawn()
-        .map_err(|error| format!("The updated application could not be restarted: {error}"))?;
+    if Path::new("/usr/bin/systemd-run").is_file() {
+        let unit_name = format!("hyprgui-restart-{old_pid}");
+        let restart_script =
+            "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec \"$2\"";
+        Command::new("/usr/bin/systemd-run")
+            .args([
+                "--user",
+                "--quiet",
+                "--collect",
+                &format!("--unit={unit_name}"),
+                &format!("--setenv=APP_DIR={}", repo_dir.display()),
+                &format!("--setenv=HYPRGUI_REPO_DIR={}", repo_dir.display()),
+                "/bin/sh",
+                "-c",
+                restart_script,
+                "hyprgui-restart",
+                &old_pid,
+                &binary_path,
+            ])
+            .spawn()
+            .map_err(|error| format!("The updated application could not be restarted: {error}"))?;
+    } else {
+        Command::new(&binary_path)
+            .env("APP_DIR", repo_dir)
+            .env("HYPRGUI_REPO_DIR", repo_dir)
+            .spawn()
+            .map_err(|error| format!("The updated application could not be restarted: {error}"))?;
+    }
 
     // The application ID stays unchanged, so the desktop shell keeps the
     // existing taskbar entry while the new process takes over.
@@ -723,7 +740,7 @@ fn restart_updated_application(parent: &ApplicationWindow, repo_dir: &Path) -> R
     Ok(())
 }
 
-fn update_software_from_github(
+fn hard_update_software_from_github(
     parent: &ApplicationWindow,
     button: &Button,
     version_ref: Option<&str>,
@@ -742,6 +759,38 @@ fn update_software_from_github(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    if let Some(version_ref) = pinned_ref.as_deref() {
+        if let Err(error) = validate_version_ref(version_ref) {
+            show_message_dialog(
+                parent,
+                gtk::MessageType::Warning,
+                "Invalid Version Ref",
+                &error,
+            );
+            return;
+        }
+    }
+
+    let script_path = repo_dir.join("scripts").join("hard-update.sh");
+    if !script_path.is_file() {
+        show_message_dialog(
+            parent,
+            gtk::MessageType::Error,
+            "Hard Update Unavailable",
+            &format!("The hard-update script was not found at {}.", script_path.display()),
+        );
+        return;
+    }
+
+    let app_dir = repo_dir.to_string_lossy().into_owned();
+    let mut command = Command::new("bash");
+    command
+        .arg(&script_path)
+        .env("APP_DIR", &app_dir)
+        .env("NO_LAUNCH", "1");
+    if let Some(version_ref) = pinned_ref {
+        command.env("APP_REF", version_ref);
+    }
 
     let restart_repo_dir = repo_dir.clone();
     let restart_parent = parent.clone();
@@ -760,15 +809,111 @@ fn update_software_from_github(
         parent,
         Some(button),
         "Updating software…",
-        "Software Updated",
+        "Hard Update Complete",
         "The new version was built. Restarting the application now…",
-        "Software Update Failed",
+        "Hard Update Failed",
         Some(restart_action),
-        move || {
-            sync_software_repo_from_github(&repo_dir, pinned_ref.as_deref())?;
-            rebuild_software_from_repo(&repo_dir)
-        },
+        move || command_result(command),
     );
+}
+
+fn hard_delete_software_from_github(parent: &ApplicationWindow, button: &Button) {
+    let Some(repo_dir) = software_repo_dir() else {
+        show_message_dialog(
+            parent,
+            gtk::MessageType::Warning,
+            "Repository Not Found",
+            "I could not find a verified local checkout of Better Hyprland GUI.",
+        );
+        return;
+    };
+
+    let script_path = repo_dir.join("scripts").join("hard-delete.sh");
+    if !script_path.is_file() {
+        show_message_dialog(
+            parent,
+            gtk::MessageType::Error,
+            "Hard Delete Unavailable",
+            &format!("The hard-delete script was not found at {}.", script_path.display()),
+        );
+        return;
+    }
+
+    let app_dir = repo_dir.to_string_lossy().into_owned();
+    let mut command = Command::new("bash");
+    command.arg(&script_path).env("APP_DIR", &app_dir);
+    run_background_task(
+        parent,
+        Some(button),
+        "Deleting checkout...",
+        "Hard Delete Complete",
+        "The application checkout was deleted. Close this window and reinstall when needed.",
+        "Hard Delete Failed",
+        move || command_result(command),
+    );
+}
+
+fn confirm_hard_update(
+    parent: &ApplicationWindow,
+    button: &Button,
+    version_ref: Option<String>,
+) {
+    let dialog = MessageDialog::builder()
+        .transient_for(parent)
+        .message_type(gtk::MessageType::Warning)
+        .buttons(gtk::ButtonsType::YesNo)
+        .title("Confirm Hard Update")
+        .text("Hard Update deletes the local application checkout, clones it again from GitHub, rebuilds it, and restarts the GUI. Local changes in that checkout will be lost. Continue?")
+        .modal(true)
+        .build();
+
+    let parent_for_action = parent.clone();
+    let button_for_action = button.clone();
+    dialog.connect_response(move |dialog, response| {
+        dialog.close();
+        if response == gtk::ResponseType::Yes {
+            hard_update_software_from_github(
+                &parent_for_action,
+                &button_for_action,
+                version_ref.as_deref(),
+            );
+        }
+    });
+    dialog.show();
+}
+
+fn confirm_hard_delete(parent: &ApplicationWindow, button: &Button) {
+    let Some(repo_dir) = software_repo_dir() else {
+        show_message_dialog(
+            parent,
+            gtk::MessageType::Warning,
+            "Repository Not Found",
+            "I could not find a verified local checkout of Better Hyprland GUI.",
+        );
+        return;
+    };
+
+    let dialog = MessageDialog::builder()
+        .transient_for(parent)
+        .message_type(gtk::MessageType::Warning)
+        .buttons(gtk::ButtonsType::YesNo)
+        .title("Confirm Hard Delete")
+        .text(&format!(
+            "This permanently deletes the Better Hyprland GUI checkout at {} and its launcher state. Your Hyprland and dotfiles configuration will not be deleted. Continue?",
+            repo_dir.display()
+        ))
+        .modal(true)
+        .build();
+
+    let parent_for_action = parent.clone();
+    let button_for_action = button.clone();
+    dialog.connect_response(move |dialog, response| {
+        dialog.close();
+        if response == gtk::ResponseType::Yes {
+            hard_delete_software_from_github(&parent_for_action, &button_for_action);
+        }
+    });
+    dialog.show();
 }
 
 fn run_hyprland_command(
@@ -3009,7 +3154,7 @@ impl ConfigGUI {
         software_version_entry.set_placeholder_text(Some("Optional: branch, tag, or commit SHA"));
 
         let version_help_label = Label::new(Some(
-            "Examples: `main`, `v0.1.0`, `dc92648`, or `github:NixOS/nixpkgs/<ref>` on NixOS.",
+            "Examples: `main`, `v0.1.0`, `dc92648`, or `github:NixOS/nixpkgs/<ref>` on NixOS. Hard Update replaces the local GUI checkout from GitHub.",
         ));
         version_help_label.set_wrap(true);
         version_help_label.set_halign(gtk::Align::Start);
@@ -3017,7 +3162,8 @@ impl ConfigGUI {
 
         let install_hyprland_button = Button::with_label("Install Hyprland");
         let update_hyprland_button = Button::with_label("Update Hyprland");
-        let update_software_button = Button::with_label("Update Software");
+        let hard_update_button = Button::with_label("Hard Update");
+        let hard_delete_button = Button::with_label("Hard Delete");
 
         let parent = self.window.clone();
         let hyprland_version_for_install = hyprland_version_entry.clone();
@@ -3035,22 +3181,29 @@ impl ConfigGUI {
 
         let parent = self.window.clone();
         let software_version_for_update = software_version_entry.clone();
-        update_software_button.connect_clicked(move |button| {
+        hard_update_button.connect_clicked(move |button| {
             let version_ref = entry_text_or_none(&software_version_for_update);
-            update_software_from_github(&parent, button, version_ref.as_deref());
+            confirm_hard_update(&parent, button, version_ref);
+        });
+
+        let parent = self.window.clone();
+        hard_delete_button.connect_clicked(move |button| {
+            confirm_hard_delete(&parent, button);
         });
 
         let button_row = Box::new(Orientation::Vertical, 10);
         button_row.set_hexpand(true);
         install_hyprland_button.set_hexpand(true);
         update_hyprland_button.set_hexpand(true);
-        update_software_button.set_hexpand(true);
+        hard_update_button.set_hexpand(true);
+        hard_delete_button.set_hexpand(true);
         button_row.append(&install_hyprland_button);
         button_row.append(&update_hyprland_button);
-        button_row.append(&update_software_button);
+        button_row.append(&hard_update_button);
+        button_row.append(&hard_delete_button);
 
         let checklist_label = Label::new(Some(
-            "Recommended path: choose a version or ref if needed, then click the install, Hyprland update, or software update button.",
+            "Recommended path: use Hard Update to replace and rebuild the GUI checkout. Hard Delete removes only the GUI installation; it does not remove Hyprland or dotfiles.",
         ));
         checklist_label.set_wrap(true);
         checklist_label.set_halign(gtk::Align::Start);

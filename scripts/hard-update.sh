@@ -105,46 +105,58 @@ ensure_clean_checkout() {
   fi
 }
 
-update_existing_checkout() {
-  local repo_dir="$1"
+validate_checkout_for_replacement() {
+  local target_dir="$1"
+  local target_real home_real
 
-  if [[ -n "$APP_REF" ]]; then
-    git -C "$repo_dir" fetch --prune --tags origin
-    checkout_version_ref "$repo_dir" "$APP_REF"
-    return 0
-  fi
-
-  local current_branch remote_branch
-  ensure_clean_checkout "$repo_dir"
-  current_branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  if [[ -z "$current_branch" || "$current_branch" == "HEAD" ]]; then
-    log "Refusing automatic update from detached HEAD. Set APP_REF explicitly or switch to a branch."
+  if [[ -L "$target_dir" ]]; then
+    log "Refusing to replace a symlinked checkout: $target_dir"
     return 1
   fi
-  remote_branch="origin/$current_branch"
 
-  git -C "$repo_dir" fetch --prune --tags origin
-  if ! git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/${remote_branch}"; then
-    log "No matching remote branch found: $remote_branch"
+  if command -v realpath >/dev/null 2>&1; then
+    target_real="$(realpath "$target_dir")"
+    home_real="$(realpath "$HOME")"
+  else
+    target_real="$(cd "$target_dir" && pwd -P)"
+    home_real="$(cd "$HOME" && pwd -P)"
+  fi
+
+  case "$target_real" in
+    "$home_real"/*) ;;
+    *)
+      log "Refusing to replace a path outside the home directory: $target_real"
+      return 1
+      ;;
+  esac
+
+  if [[ ! -e "$target_dir/.git" || ! -f "$target_dir/Cargo.toml" ]]; then
+    log "Refusing to replace a directory that is not a Better Hyprland GUI checkout: $target_dir"
     return 1
   fi
-  git -C "$repo_dir" merge --ff-only "$remote_branch"
+
+  if ! grep -Eq '^[[:space:]]*name[[:space:]]*=[[:space:]]*"hyprgui"[[:space:]]*$' "$target_dir/Cargo.toml"; then
+    log "Refusing to replace a checkout whose Cargo package is not hyprgui: $target_dir"
+    return 1
+  fi
 }
 
 clone_or_update_repo() {
   local target_dir
   target_dir="$(resolve_target_dir)"
 
-  if [[ -e "$target_dir/.git" ]]; then
-    log "Hard-updating existing checkout in $target_dir"
-    update_existing_checkout "$target_dir"
-  else
-    log "Checkout not found, cloning into $APP_DIR"
-    git clone "$REPO_URL" "$APP_DIR"
-    if [[ -n "$APP_REF" ]]; then
-      git -C "$APP_DIR" fetch --tags origin
-      checkout_version_ref "$APP_DIR" "$APP_REF"
-    fi
+  if [[ -e "$target_dir" ]]; then
+    validate_checkout_for_replacement "$target_dir"
+    log "Removing existing checkout for hard update: $target_dir"
+    rm -rf -- "$target_dir"
+  fi
+
+  mkdir -p "$(dirname "$target_dir")"
+  log "Cloning a fresh checkout into $target_dir"
+  git clone "$REPO_URL" "$target_dir"
+  if [[ -n "$APP_REF" ]]; then
+    git -C "$target_dir" fetch --tags origin
+    checkout_version_ref "$target_dir" "$APP_REF"
   fi
 }
 

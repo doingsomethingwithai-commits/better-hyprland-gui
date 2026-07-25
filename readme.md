@@ -51,7 +51,7 @@ If you run them inside this repository, they update or delete this checkout dire
 
 When the scripts are piped from `curl | bash`, they now ignore unrelated parent git directories and use the installed checkout path instead.
 
-`hard-update.sh` rebuilds the GUI after refreshing the checkout and then launches the rebuilt binary unless you set `NO_LAUNCH=1`. Updates now require a clean checkout and a fast-forwardable branch; commit or stash local changes first.
+`hard-update.sh` replaces the verified GUI checkout with a fresh clone from GitHub, rebuilds the GUI, and then launches the rebuilt binary unless you set `NO_LAUNCH=1`. It never deletes your Hyprland or dotfiles configuration. If you use the GUI's `Hard Update` button, the app asks for confirmation before performing this reset.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/hard-update.sh | bash
@@ -67,7 +67,7 @@ NO_LAUNCH=1 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-co
 APP_REF=v0.1.0 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/hard-update.sh | bash
 ```
 
-If you need to remove the whole local checkout first:
+If you need to remove the whole local GUI installation first:
 
 > [!WARNING]
 > This permanently removes the detected Better Hyprland GUI checkout. The script refuses paths outside your home directory and verifies the `hyprgui` Cargo package before deleting anything.
@@ -75,6 +75,8 @@ If you need to remove the whole local checkout first:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/doingsomethingwithai-commits/better-hyprland-gui/main/scripts/hard-delete.sh | bash
 ```
+
+The GUI also provides a `Hard Delete` button. It asks for confirmation, removes the verified GUI checkout and its launcher state, and leaves Hyprland and dotfiles untouched.
 
 ## Hyprland Install
 
@@ -84,7 +86,7 @@ Hyprland itself is installed from inside the app:
 - Go to the Hyprland install page.
 - Click `Install Hyprland`.
 - Click `Update Hyprland` when you want the GUI to detect your distro and run the right update command.
-- Click `Update Software` when you want the GUI to pull the latest code from GitHub and rebuild itself.
+- Click `Hard Update` when you want the GUI checkout replaced from GitHub, rebuilt, and restarted.
 - Use the recovery commands above if the software update path is broken.
 - Enter a version or ref in the app if you want to pin a specific repo branch, tag, or commit SHA.
 - For Hyprland version pinning, use a NixOS flake ref such as `nixpkgs/release-20.09` or `github:NixOS/nixpkgs/<ref>`.
