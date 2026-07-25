@@ -2776,7 +2776,7 @@ impl ConfigGUI {
                 "Profile Applied",
                 "The selected profile is now active.",
                 "Profile Apply Failed",
-                Some(Box::new(move || {
+                Some(std::boxed::Box::new(move || {
                     refresh_for_apply();
                     show_install_result(
                         &success_parent_for_apply,
@@ -2810,7 +2810,7 @@ impl ConfigGUI {
                     &parent,
                     button,
                     &profile,
-                    Some(Box::new(move || {
+                    Some(std::boxed::Box::new(move || {
                         refresh_after_install();
                         show_install_result(
                             &success_parent,
@@ -2896,7 +2896,7 @@ impl ConfigGUI {
                 &parent,
                 button,
                 &profile,
-                Some(Box::new(move || {
+                Some(std::boxed::Box::new(move || {
                     refresh_after_install();
                     show_install_result(
                         &success_parent,
