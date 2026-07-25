@@ -36,6 +36,13 @@ struct FileProfileStore {
     selected: Option<String>,
 }
 
+fn icon_image(icon_name: &str) -> Image {
+    let image = Image::from_icon_name(icon_name);
+    image.set_valign(gtk::Align::Center);
+    image.set_vexpand(false);
+    image
+}
+
 fn add_dropdown_option(
     container: &Box,
     options: &mut HashMap<String, Widget>,
@@ -57,7 +64,7 @@ fn add_dropdown_option(
     label_widget.set_halign(gtk::Align::Start);
 
     let tooltip_button = Button::new();
-    let question_mark_icon = Image::from_icon_name("dialog-question-symbolic");
+    let question_mark_icon = icon_image("dialog-question-symbolic");
     tooltip_button.set_child(Some(&question_mark_icon));
     tooltip_button.set_has_frame(false);
 
@@ -168,11 +175,31 @@ fn show_install_result(parent: &ApplicationWindow, title: &str, success: bool, o
     show_message_dialog(parent, message_type, title, output);
 }
 
+fn git_repo_root(path: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
+}
+
 fn find_repo_root(start: PathBuf) -> Option<PathBuf> {
     let mut current = Some(start.as_path());
     while let Some(path) = current {
-        if path.join(".git").exists() {
-            return Some(path.to_path_buf());
+        if let Some(root) = git_repo_root(path) {
+            return Some(root);
         }
         current = path.parent();
     }
@@ -337,6 +364,8 @@ fn validate_version_ref(version_ref: &str) -> Result<&str, String> {
 }
 
 fn ensure_repo_clean(repo_dir: &Path) -> Result<(), String> {
+    ensure_git_repository(repo_dir)?;
+
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_dir)
@@ -361,7 +390,20 @@ fn ensure_repo_clean(repo_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_git_repository(repo_dir: &Path) -> Result<(), String> {
+    if git_repo_root(repo_dir).is_some() {
+        Ok(())
+    } else {
+        Err(format!(
+            "The configured application directory is not a Git checkout.\n\nPath: {}\n\nSet APP_DIR or HYPRGUI_REPO_DIR to the cloned Better Hyprland GUI repository, then try again.",
+            repo_dir.display()
+        ))
+    }
+}
+
 fn fetch_repo(repo_dir: &Path) -> Result<(), String> {
+    ensure_git_repository(repo_dir)?;
+
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_dir)
@@ -1040,7 +1082,7 @@ fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &F
 fn button_with_icon_label(icon_name: &str, text: &str) -> Button {
     let button = Button::new();
     let inner = Box::new(Orientation::Horizontal, 6);
-    let icon = Image::from_icon_name(icon_name);
+    let icon = icon_image(icon_name);
     let label = Label::new(Some(text));
     inner.append(&icon);
     inner.append(&label);
@@ -1282,7 +1324,7 @@ impl ConfigGUI {
         });
 
         let tooltip_button = Button::new();
-        let question_mark_icon = Image::from_icon_name("dialog-question-symbolic");
+        let question_mark_icon = icon_image("dialog-question-symbolic");
         tooltip_button.set_child(Some(&question_mark_icon));
         tooltip_button.set_has_frame(false);
         header_bar.pack_start(&tooltip_button);
@@ -1647,6 +1689,7 @@ impl ConfigGUI {
         };
 
         let refresh_holder: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        let refresh_holder_for_ui = refresh_holder.clone();
         let refresh_ui: Rc<dyn Fn()> = {
             let store = store.clone();
             let selected_name = selected_name.clone();
@@ -1729,7 +1772,7 @@ impl ConfigGUI {
                     let store_for_card = store.clone();
                     let selected_for_card = selected_name.clone();
                     let update_detail_for_card = update_detail.clone();
-                    let refresh_holder_for_card = refresh_holder.clone();
+                    let refresh_holder_for_card = refresh_holder_for_ui.clone();
                     card.connect_clicked(move |_| {
                         {
                             let mut store = store_for_card.borrow_mut();
@@ -1856,11 +1899,13 @@ impl ConfigGUI {
                         show_message_dialog(&parent, gtk::MessageType::Warning, "Missing data", "A profile name and repository URL are required.");
                     } else {
                         *selected_for_add.borrow_mut() = Some(profile.name.clone());
-                        let mut store = store_for_add.borrow_mut();
-                        store.profiles.retain(|item| item.name != profile.name);
-                        store.selected = Some(profile.name.clone());
-                        store.profiles.push(profile);
-                        save_file_profile_store(&store);
+                        {
+                            let mut store = store_for_add.borrow_mut();
+                            store.profiles.retain(|item| item.name != profile.name);
+                            store.selected = Some(profile.name.clone());
+                            store.profiles.push(profile);
+                            save_file_profile_store(&store);
+                        }
                         refresh_for_add();
                     }
                 }
@@ -1899,11 +1944,13 @@ impl ConfigGUI {
                 show_message_dialog(&parent, gtk::MessageType::Warning, "Nothing selected", "Select a profile first.");
                 return;
             };
-            let mut store = store_for_remove.borrow_mut();
-            store.profiles.retain(|profile| profile.name != selected);
-            store.selected = store.profiles.first().map(|profile| profile.name.clone());
-            *selected_for_remove.borrow_mut() = store.selected.clone();
-            save_file_profile_store(&store);
+            {
+                let mut store = store_for_remove.borrow_mut();
+                store.profiles.retain(|profile| profile.name != selected);
+                store.selected = store.profiles.first().map(|profile| profile.name.clone());
+                *selected_for_remove.borrow_mut() = store.selected.clone();
+                save_file_profile_store(&store);
+            }
             refresh_for_remove();
         });
 
@@ -4375,7 +4422,7 @@ impl ConfigWidget {
         label_widget.set_halign(gtk::Align::Start);
 
         let tooltip_button = Button::new();
-        let question_mark_icon = Image::from_icon_name("dialog-question-symbolic");
+        let question_mark_icon = icon_image("dialog-question-symbolic");
         tooltip_button.set_child(Some(&question_mark_icon));
         tooltip_button.set_has_frame(false);
 
@@ -4430,7 +4477,7 @@ impl ConfigWidget {
         label_widget.set_halign(gtk::Align::Start);
 
         let tooltip_button = Button::new();
-        let question_mark_icon = Image::from_icon_name("dialog-question-symbolic");
+        let question_mark_icon = icon_image("dialog-question-symbolic");
         tooltip_button.set_child(Some(&question_mark_icon));
         tooltip_button.set_has_frame(false);
 
@@ -4483,7 +4530,7 @@ impl ConfigWidget {
         label_widget.set_halign(gtk::Align::Start);
 
         let tooltip_button = Button::new();
-        let question_mark_icon = Image::from_icon_name("dialog-question-symbolic");
+        let question_mark_icon = icon_image("dialog-question-symbolic");
         tooltip_button.set_child(Some(&question_mark_icon));
         tooltip_button.set_has_frame(false);
 
@@ -4538,7 +4585,7 @@ impl ConfigWidget {
         label_widget.set_halign(gtk::Align::Start);
 
         let tooltip_button = Button::new();
-        let question_mark_icon = Image::from_icon_name("dialog-question-symbolic");
+        let question_mark_icon = icon_image("dialog-question-symbolic");
         tooltip_button.set_child(Some(&question_mark_icon));
         tooltip_button.set_has_frame(false);
 
@@ -4591,7 +4638,7 @@ impl ConfigWidget {
         label_widget.set_halign(gtk::Align::Start);
 
         let tooltip_button = Button::new();
-        let question_mark_icon = Image::from_icon_name("dialog-question-symbolic");
+        let question_mark_icon = icon_image("dialog-question-symbolic");
         tooltip_button.set_child(Some(&question_mark_icon));
         tooltip_button.set_has_frame(false);
 
