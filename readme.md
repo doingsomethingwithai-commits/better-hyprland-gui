@@ -99,8 +99,9 @@ Open the `.files` workspace, add a Git repository, and use the profile actions i
 
 1. Click `Install profile` to clone the repository into the configured install path.
 2. Select the profile and click `Apply profile` to copy its supported configuration into your home directory.
-3. The GUI backs up files it is about to replace under `~/.config/hyprgui/backups/` and records the active profile so it can safely remove files managed by the previous activation.
-4. Hyprland is reloaded with `hyprctl reload` when available; otherwise the GUI tells you to reload it manually.
+3. For repositories that provide a `setup` script, use `Setup & Apply` to apply the profile and open a terminal for the repository's interactive `bash ./setup install` flow. The GUI asks for confirmation because this may install packages or change system services.
+4. The GUI backs up files it is about to replace under `~/.config/hyprgui/backups/` and records the active profile so it can safely remove files managed by the previous activation.
+5. Hyprland is reloaded with `hyprctl reload` when available; otherwise the GUI tells you to reload it manually.
 
 The activation flow recognizes common layouts: a repository root or `dots/`, `home/`, or `dotfiles/` directory that mirrors `$HOME`, an XDG `config/` tree, a `hypr/` directory, and GNU Stow-style packages such as `hyprland/.config/`. Symlinks that resolve inside the installed repository are copied safely as regular files, while links outside the repository and existing destination symlinks are refused to avoid writing outside the selected home directory. Sensitive paths such as `.ssh` are intentionally not activated automatically.
 

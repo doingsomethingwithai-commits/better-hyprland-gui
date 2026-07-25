@@ -1767,6 +1767,145 @@ fn apply_file_profile(profile: &FileProfile) -> Result<String, String> {
     Ok(message)
 }
 
+fn profile_setup_path(profile: &FileProfile) -> Result<PathBuf, String> {
+    let profile_root = file_profile_install_path(profile);
+    let setup_path = profile_root.join("setup");
+    let metadata = fs::symlink_metadata(&setup_path).map_err(|error| {
+        format!(
+            "This profile does not provide a usable setup script at {}: {error}",
+            setup_path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "Refusing to run setup because {} is not a regular file.",
+            setup_path.display()
+        ));
+    }
+    Ok(setup_path)
+}
+
+fn executable_on_path(name: &str) -> Option<PathBuf> {
+    env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .map(|path| path.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn launch_profile_setup_terminal(profile: &FileProfile) -> Result<(), String> {
+    let setup_path = profile_setup_path(profile)?;
+    let profile_root = setup_path
+        .parent()
+        .ok_or_else(|| "Could not determine the profile setup directory.".to_string())?;
+    let profile_root = profile_root.to_string_lossy().into_owned();
+    let terminal_candidates = [
+        ("kitty", "-e"),
+        ("alacritty", "-e"),
+        ("foot", "-e"),
+        ("konsole", "-e"),
+        ("gnome-terminal", "--"),
+        ("xterm", "-e"),
+    ];
+    let Some((terminal_name, terminal_flag, terminal_path)) = terminal_candidates
+        .iter()
+        .find_map(|(name, flag)| executable_on_path(name).map(|path| (*name, *flag, path)))
+    else {
+        return Err(
+            "No supported terminal emulator was found. Open a terminal manually and run `cd <profile-path> && bash ./setup install`."
+                .to_string(),
+        );
+    };
+
+    let setup_script = "cd -- \"$1\" || exit 1; bash ./setup install; status=$?; printf '\\nSetup exited with status %s. Press Enter to close.\\n' \"$status\"; read -r; exit \"$status\"";
+    let mut command = Command::new(terminal_path);
+    command.args([
+        terminal_flag,
+        "bash",
+        "-lc",
+        setup_script,
+        "better-hyprland-gui-setup",
+        &profile_root,
+    ]);
+    command
+        .spawn()
+        .map_err(|error| format!("Could not open {terminal_name} for repository setup: {error}"))?;
+    Ok(())
+}
+
+fn confirm_setup_and_apply_profile(
+    parent: &ApplicationWindow,
+    button: &Button,
+    profile: FileProfile,
+    refresh_after_apply: Rc<dyn Fn()>,
+    success_parent: ApplicationWindow,
+) {
+    let setup_path = match profile_setup_path(&profile) {
+        Ok(path) => path,
+        Err(error) => {
+            show_message_dialog(
+                parent,
+                gtk::MessageType::Warning,
+                "Setup Unavailable",
+                &error,
+            );
+            return;
+        }
+    };
+
+    let dialog = MessageDialog::builder()
+        .transient_for(parent)
+        .message_type(gtk::MessageType::Warning)
+        .buttons(gtk::ButtonsType::YesNo)
+        .title("Run repository setup?")
+        .text(&format!(
+            "This will apply '{}' and open a terminal to run `bash ./setup install` from {}. The setup may install packages, request your password, and change system configuration. Continue?",
+            profile.name,
+            setup_path.parent().unwrap_or_else(|| Path::new(".")).display()
+        ))
+        .modal(true)
+        .build();
+
+    let parent_for_action = parent.clone();
+    let button_for_action = button.clone();
+    dialog.connect_response(move |dialog, response| {
+        dialog.close();
+        if response != gtk::ResponseType::Yes {
+            return;
+        }
+
+        let refresh_after_apply = refresh_after_apply.clone();
+        let success_parent = success_parent.clone();
+        let profile_for_task = profile.clone();
+        run_background_task_with_completion(
+            &parent_for_action,
+            Some(&button_for_action),
+            "Applying and preparing...",
+            "Setup Started",
+            "The profile was applied and the repository setup was opened in a terminal.",
+            "Setup & Apply Failed",
+            Some(std::boxed::Box::new(move || {
+                refresh_after_apply();
+                show_install_result(
+                    &success_parent,
+                    "Setup Started",
+                    true,
+                    "The profile was applied and the repository setup was opened in a terminal.",
+                );
+            })),
+            move || {
+                apply_file_profile(&profile_for_task)?;
+                launch_profile_setup_terminal(&profile_for_task).map_err(|error| {
+                    format!(
+                        "The profile was applied, but the repository setup could not be started.\n\n{error}"
+                    )
+                })
+            },
+        );
+    });
+    dialog.show();
+}
+
 fn file_profile_name_from_url(url: &str) -> String {
     normalize_repo_url(url)
         .trim_end_matches('/')
@@ -2574,6 +2713,11 @@ impl ConfigGUI {
             "Copy this profile's Hyprland files into the active configuration and reload Hyprland",
         ));
         apply_profile_button.add_css_class("suggested-action");
+        let setup_apply_profile_button = Button::with_label("Setup & Apply");
+        setup_apply_profile_button.set_tooltip_text(Some(
+            "Apply the profile, then run its setup script in a terminal",
+        ));
+        setup_apply_profile_button.add_css_class("suggested-action");
         let run_command_button = Button::with_label("Install / Update");
         run_command_button.set_tooltip_text(Some(
             "Clone a new profile or fast-forward an installed profile",
@@ -2584,10 +2728,12 @@ impl ConfigGUI {
             .set_tooltip_text(Some("Remove the saved profile without deleting its files"));
         open_profile_button.set_hexpand(true);
         apply_profile_button.set_hexpand(true);
+        setup_apply_profile_button.set_hexpand(true);
         run_command_button.set_hexpand(true);
         remove_profile_button.set_hexpand(true);
         open_profile_button.add_css_class("wallpaper-action");
         apply_profile_button.add_css_class("wallpaper-action");
+        setup_apply_profile_button.add_css_class("wallpaper-action");
         run_command_button.add_css_class("wallpaper-action");
         remove_profile_button.add_css_class("wallpaper-action");
 
@@ -2603,6 +2749,7 @@ impl ConfigGUI {
         detail_box.append(&Separator::new(Orientation::Horizontal));
         detail_box.append(&open_profile_button);
         detail_box.append(&apply_profile_button);
+        detail_box.append(&setup_apply_profile_button);
         detail_box.append(&run_command_button);
         detail_box.append(&remove_profile_button);
         detail_scroller.set_child(Some(&detail_box));
@@ -2647,6 +2794,7 @@ impl ConfigGUI {
             let notes_label = notes_label.clone();
             let open_profile_button = open_profile_button.clone();
             let apply_profile_button = apply_profile_button.clone();
+            let setup_apply_profile_button = setup_apply_profile_button.clone();
             let run_command_button = run_command_button.clone();
             let remove_profile_button = remove_profile_button.clone();
             Rc::new(move |profile| {
@@ -2661,6 +2809,7 @@ impl ConfigGUI {
                     notes_label.set_text("Notes: -");
                     open_profile_button.set_sensitive(false);
                     apply_profile_button.set_sensitive(false);
+                    setup_apply_profile_button.set_sensitive(false);
                     run_command_button.set_sensitive(false);
                     remove_profile_button.set_sensitive(false);
                     return;
@@ -2689,6 +2838,10 @@ impl ConfigGUI {
                 notes_label.set_text(&notes_text);
                 open_profile_button.set_sensitive(true);
                 apply_profile_button.set_sensitive(file_profile_is_installed(&profile));
+                setup_apply_profile_button.set_sensitive(
+                    file_profile_is_installed(&profile)
+                        && profile_setup_path(&profile).is_ok(),
+                );
                 run_command_button.set_sensitive(true);
                 remove_profile_button.set_sensitive(true);
                 run_command_button.set_label(if file_profile_is_installed(&profile) {
@@ -3003,6 +3156,39 @@ impl ConfigGUI {
                     );
                 })),
                 move || apply_file_profile(&profile).map(|_| ()),
+            );
+        });
+
+        let parent = self.window.clone();
+        let store_for_setup_apply = self.file_profiles.clone();
+        let selected_for_setup_apply = selected_name.clone();
+        let refresh_for_setup_apply = refresh_ui.clone();
+        let success_parent_for_setup_apply = parent.clone();
+        setup_apply_profile_button.connect_clicked(move |button| {
+            let Some(selected) = selected_for_setup_apply.borrow().clone() else {
+                show_message_dialog(
+                    &parent,
+                    gtk::MessageType::Warning,
+                    "Nothing selected",
+                    "Select a profile first.",
+                );
+                return;
+            };
+            let Some(profile) = store_for_setup_apply
+                .borrow()
+                .profiles
+                .iter()
+                .find(|item| item.name == selected)
+                .cloned()
+            else {
+                return;
+            };
+            confirm_setup_and_apply_profile(
+                &parent,
+                button,
+                profile,
+                refresh_for_setup_apply.clone(),
+                success_parent_for_setup_apply.clone(),
             );
         });
 
