@@ -566,9 +566,23 @@ fn command_result(mut command: Command) -> Result<(), String> {
     if output.status.success() {
         Ok(())
     } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let lowercase_stderr = stderr.to_lowercase();
+        if lowercase_stderr.contains("db.lck")
+            || lowercase_stderr.contains("unable to lock database")
+            || lowercase_stderr.contains("could not lock database")
+            || (lowercase_stderr.contains("datenbank")
+                && lowercase_stderr.contains("sperr"))
+        {
+            return Err(
+                "Another system package manager is currently using the package database. Close the other installer or update process, wait for it to finish, and try again. Do not delete the lock file manually."
+                    .to_string(),
+            );
+        }
+
         Err(format!(
             "The command failed.\n\n{}",
-            String::from_utf8_lossy(&output.stderr)
+            stderr
         ))
     }
 }
@@ -830,6 +844,17 @@ fn normalize_repo_url(value: &str) -> String {
 
 fn normalize_git_remote_identity(value: &str) -> String {
     let mut normalized = normalize_repo_url(value).replace('\\', "/");
+
+    // Repository links copied from redirect pages can leave the wrapper URL
+    // configured as origin. Compare the embedded GitHub repository instead.
+    if let Some(start) = normalized.to_ascii_lowercase().find("github.com/") {
+        normalized = normalized[start..].to_string();
+    }
+    normalized = normalized
+        .split(&['&', '?', '#', ' ', '\n', '\r', ')', '>'][..])
+        .next()
+        .unwrap_or(&normalized)
+        .to_string();
 
     if let Some(rest) = normalized.strip_prefix("git@") {
         normalized = rest.replacen(':', "/", 1);
@@ -1526,6 +1551,7 @@ impl ConfigGUI {
 
         let gallery_frame = Frame::new(Some("Dotfile profiles"));
         gallery_frame.set_hexpand(true);
+        gallery_frame.set_size_request(260, -1);
         let gallery_scroller = ScrolledWindow::new();
         gallery_scroller.set_vexpand(true);
         gallery_scroller.set_hexpand(true);
@@ -1541,6 +1567,7 @@ impl ConfigGUI {
 
         let detail_frame = Frame::new(Some("Profile details"));
         detail_frame.set_size_request(330, -1);
+        detail_frame.set_vexpand(true);
         let detail_box = Box::new(Orientation::Vertical, 9);
         detail_box.set_margin_top(12);
         detail_box.set_margin_bottom(12);
@@ -1566,16 +1593,20 @@ impl ConfigGUI {
         let repo_label = Label::new(Some("Repository: -"));
         repo_label.set_halign(gtk::Align::Start);
         repo_label.set_wrap(true);
+        repo_label.set_max_width_chars(42);
         repo_label.set_selectable(true);
         let path_label = Label::new(Some("Install path: -"));
         path_label.set_halign(gtk::Align::Start);
         path_label.set_wrap(true);
+        path_label.set_max_width_chars(42);
         let version_label = Label::new(Some("Branch / ref: latest"));
         version_label.set_halign(gtk::Align::Start);
         version_label.set_wrap(true);
+        version_label.set_max_width_chars(42);
         let notes_label = Label::new(Some("Notes: -"));
         notes_label.set_halign(gtk::Align::Start);
         notes_label.set_wrap(true);
+        notes_label.set_max_width_chars(42);
         notes_label.set_opacity(0.8);
 
         let open_profile_button = Button::with_label("Open repository");
@@ -4794,6 +4825,12 @@ mod tests {
         );
         assert_eq!(
             normalize_git_remote_identity("[repo](https://github.com/example/dotfiles)"),
+            expected
+        );
+        assert_eq!(
+            normalize_git_remote_identity(
+                "https://www.youtube.com/redirect?event=video_description&q=https://github.com/example/dotfiles&v=1"
+            ),
             expected
         );
     }
