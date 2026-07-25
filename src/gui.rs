@@ -11,8 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -37,6 +36,8 @@ struct FileProfile {
 struct FileProfileStore {
     profiles: Vec<FileProfile>,
     selected: Option<String>,
+    active_profile: Option<String>,
+    active_entries: Vec<String>,
 }
 
 fn icon_image(icon_name: &str) -> Image {
@@ -896,14 +897,20 @@ fn load_file_profile_store() -> FileProfileStore {
 }
 
 fn save_file_profile_store(store: &FileProfileStore) {
+    let _ = persist_file_profile_store(store);
+}
+
+fn persist_file_profile_store(store: &FileProfileStore) -> Result<(), String> {
     let path = file_profiles_state_path();
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
     }
 
-    if let Ok(content) = serde_json::to_string_pretty(store) {
-        let _ = fs::write(path, content);
-    }
+    let content = serde_json::to_string_pretty(store)
+        .map_err(|error| format!("Could not serialize dotfiles state: {error}"))?;
+    fs::write(&path, content)
+        .map_err(|error| format!("Could not save {}: {error}", path.display()))
 }
 
 fn default_file_install_path() -> String {
@@ -1096,8 +1103,14 @@ fn file_profile_is_installed(profile: &FileProfile) -> bool {
     file_profile_install_path(profile).join(".git").is_dir()
 }
 
+fn file_profile_is_active(profile: &FileProfile) -> bool {
+    load_file_profile_store().active_profile.as_deref() == Some(profile.name.as_str())
+}
+
 fn file_profile_status(profile: &FileProfile) -> &'static str {
-    if file_profile_is_installed(profile) {
+    if file_profile_is_active(profile) {
+        "Active"
+    } else if file_profile_is_installed(profile) {
         "Installed"
     } else {
         "Not installed"
@@ -1149,8 +1162,189 @@ fn file_profile_preview(profile: &FileProfile) -> String {
     "Install this profile to preview its files here.".to_string()
 }
 
-fn copy_profile_tree(source: &Path, destination: &Path) -> Result<(), String> {
+const HOME_LAYOUT_ENTRIES: &[&str] = &[
+    ".config",
+    ".local",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_logout",
+    ".profile",
+    ".zshrc",
+    ".zprofile",
+    ".zshenv",
+    ".tmux.conf",
+    ".vimrc",
+    ".Xresources",
+    ".xinitrc",
+    ".gtkrc-2.0",
+];
+
+fn xdg_config_home(home: &Path) -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))
+}
+
+fn has_home_layout_entries(root: &Path) -> bool {
+    HOME_LAYOUT_ENTRIES
+        .iter()
+        .any(|name| root.join(name).exists())
+}
+
+fn add_home_layout_plan(
+    source_root: &Path,
+    home: &Path,
+    plan: &mut Vec<(PathBuf, PathBuf)>,
+) {
+    for name in HOME_LAYOUT_ENTRIES {
+        let source = source_root.join(name);
+        if !source.exists() {
+            continue;
+        }
+
+        let destination = home.join(name);
+        if !plan
+            .iter()
+            .any(|(existing_source, existing_destination)| {
+                existing_source == &source && existing_destination == &destination
+            })
+        {
+            plan.push((source, destination));
+        }
+    }
+}
+
+fn add_hypr_layout_plan(source_root: &Path, home: &Path, plan: &mut Vec<(PathBuf, PathBuf)>) {
+    let source = source_root.join("hypr");
     if source.is_dir() {
+        let destination = xdg_config_home(home).join("hypr");
+        if !plan
+            .iter()
+            .any(|(existing_source, existing_destination)| {
+                existing_source == &source && existing_destination == &destination
+            })
+        {
+            plan.push((source, destination));
+        }
+    }
+
+    let source = source_root.join("hyprland.conf");
+    if source.is_file() {
+        plan.push((
+            source,
+            xdg_config_home(home).join("hypr").join("hyprland.conf"),
+        ));
+    }
+}
+
+fn profile_copy_plan(
+    profile_root: &Path,
+    home: &Path,
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let config_home = xdg_config_home(home);
+    if !config_home.is_absolute() || !config_home.starts_with(home) {
+        return Err(
+            "XDG_CONFIG_HOME must be an absolute path inside the home directory for safe activation."
+                .to_string(),
+        );
+    }
+
+    let mut plan = Vec::new();
+
+    // Home-tree layouts used by chezmoi-like repositories and repositories
+    // such as end-4/dots-hyprland.
+    for layout_name in ["dots", "home", "dotfiles"] {
+        let source_root = profile_root.join(layout_name);
+        if source_root.is_dir() {
+            add_home_layout_plan(&source_root, home, &mut plan);
+            add_hypr_layout_plan(&source_root, home, &mut plan);
+        }
+    }
+
+    // A repository can mirror $HOME directly, or expose an XDG config tree.
+    add_home_layout_plan(profile_root, home, &mut plan);
+    add_hypr_layout_plan(profile_root, home, &mut plan);
+
+    let config_root = profile_root.join("config");
+    if config_root.join("hypr").is_dir() {
+        plan.push((config_root, xdg_config_home(home)));
+    }
+
+    // GNU Stow-style repositories contain packages such as `hyprland/.config`
+    // or `nvim/.config`. Only directories that look like home trees qualify;
+    // README, scripts, and metadata are never copied.
+    if plan.is_empty() {
+        for entry in fs::read_dir(profile_root)
+            .map_err(|error| format!("Could not read {}: {error}", profile_root.display()))?
+        {
+            let entry = entry.map_err(|error| format!("Could not inspect profile: {error}"))?;
+            let source_root = entry.path();
+            if source_root.is_dir()
+                && entry.file_name() != ".git"
+                && has_home_layout_entries(&source_root)
+            {
+                add_home_layout_plan(&source_root, home, &mut plan);
+                add_hypr_layout_plan(&source_root, home, &mut plan);
+            }
+        }
+    }
+
+    if plan.is_empty() {
+        return Err("This profile does not contain a supported dotfiles tree. Expected dots/home/dotfiles, a .config tree, a hypr directory, a root home layout, or GNU Stow-style packages.".to_string());
+    }
+
+    Ok(plan)
+}
+
+fn ensure_destination_parents_are_not_symlinks(destination: &Path) -> Result<(), String> {
+    let mut current = destination.parent();
+    while let Some(path) = current {
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Refusing to write through symlinked destination directory {}.",
+                    path.display()
+                ));
+            }
+        }
+
+        let Some(parent) = path.parent() else {
+            break;
+        };
+        if parent == path {
+            break;
+        }
+        current = Some(parent);
+    }
+    Ok(())
+}
+
+fn copy_profile_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    ensure_destination_parents_are_not_symlinks(destination)?;
+    let source_metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("Could not inspect {}: {error}", source.display()))?;
+    if source_metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Refusing to copy symlinked profile path {}.",
+            source.display()
+        ));
+    }
+
+    if source_metadata.is_dir() {
+        if let Ok(destination_metadata) = fs::symlink_metadata(destination) {
+            if destination_metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Refusing to copy into symlinked destination {}. Remove it or choose another profile path first.",
+                    destination.display()
+                ));
+            }
+            if !destination_metadata.is_dir() {
+                fs::remove_file(destination).map_err(|error| {
+                    format!("Could not replace {} with a directory: {error}", destination.display())
+                })?;
+            }
+        }
         fs::create_dir_all(destination)
             .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
         for entry in fs::read_dir(source)
@@ -1166,12 +1360,14 @@ fn copy_profile_tree(source: &Path, destination: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-    }
-    if destination.exists() {
-        if destination.is_dir() {
+    if let Ok(destination_metadata) = fs::symlink_metadata(destination) {
+        if destination_metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing to replace symlinked destination {}. Remove it or choose another profile path first.",
+                destination.display()
+            ));
+        }
+        if destination_metadata.is_dir() {
             fs::remove_dir_all(destination)
                 .map_err(|error| format!("Could not replace {}: {error}", destination.display()))?;
         } else {
@@ -1179,9 +1375,94 @@ fn copy_profile_tree(source: &Path, destination: &Path) -> Result<(), String> {
                 .map_err(|error| format!("Could not replace {}: {error}", destination.display()))?;
         }
     }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    }
     fs::copy(source, destination)
         .map_err(|error| format!("Could not copy {}: {error}", source.display()))?;
     Ok(())
+}
+
+fn collect_profile_files(
+    source: &Path,
+    destination: &Path,
+    home: &Path,
+    entries: &mut Vec<String>,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("Could not inspect {}: {error}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Refusing to activate symlinked profile path {}.",
+            source.display()
+        ));
+    }
+
+    if metadata.is_dir() {
+        for entry in fs::read_dir(source)
+            .map_err(|error| format!("Could not read {}: {error}", source.display()))?
+        {
+            let entry =
+                entry.map_err(|error| format!("Could not inspect profile file: {error}"))?;
+            if entry.file_name() != ".git" {
+                collect_profile_files(
+                    &entry.path(),
+                    &destination.join(entry.file_name()),
+                    home,
+                    entries,
+                )?;
+            }
+        }
+        return Ok(());
+    }
+
+    let relative = destination
+        .strip_prefix(home)
+        .map_err(|_| format!("Profile destination escapes home: {}", destination.display()))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if entries.iter().any(|entry| entry == &relative) {
+        return Err(format!("Multiple profile sources target {relative}."));
+    }
+    entries.push(relative);
+    Ok(())
+}
+
+fn safe_home_path(home: &Path, relative: &str) -> Result<PathBuf, String> {
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+        })
+    {
+        return Err(format!("Refusing unsafe managed path: {relative}"));
+    }
+
+    let path = home.join(relative_path);
+    if !path.starts_with(home) {
+        return Err(format!("Managed path escapes home: {relative}"));
+    }
+    Ok(path)
+}
+
+fn sanitized_profile_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "profile".to_string()
+    } else {
+        sanitized
+    }
 }
 
 fn apply_file_profile(profile: &FileProfile) -> Result<String, String> {
@@ -1191,32 +1472,26 @@ fn apply_file_profile(profile: &FileProfile) -> Result<String, String> {
     }
 
     let home = home_dir().ok_or_else(|| "Could not determine the home directory.".to_string())?;
-    let copy_plan = if profile_root.join("dots").is_dir() {
-        // Repositories such as end-4/dots-hyprland keep the actual home tree
-        // below `dots/`. Keep the plan limited to dot-directories so backups
-        // never include the whole home directory.
-        let dots = profile_root.join("dots");
-        let mut plan = Vec::new();
-        for name in [".config", ".local"] {
-            let source = dots.join(name);
-            if source.is_dir() {
-                plan.push((source, home.join(name)));
-            }
+    let copy_plan = profile_copy_plan(&profile_root, &home)?;
+    for (source, destination) in &copy_plan {
+        if source == destination || source.starts_with(destination) || destination.starts_with(source) {
+            return Err(format!(
+                "Profile source {} overlaps its activation destination {}.",
+                source.display(),
+                destination.display()
+            ));
         }
-        plan
-    } else if profile_root.join(".config").is_dir() {
-        vec![(profile_root.join(".config"), home.join(".config"))]
-    } else if profile_root.join("hypr").is_dir() {
-        vec![(profile_root.join("hypr"), home.join(".config").join("hypr"))]
-    } else {
-        return Err("This profile does not contain a supported dotfiles tree (expected dots/.config, .config, or hypr).".to_string());
-    };
-    if copy_plan.is_empty() {
-        return Err(
-            "The dots directory does not contain .config or .local files to install.".to_string(),
-        );
     }
 
+    let mut manifest = Vec::new();
+    for (source, destination) in &copy_plan {
+        collect_profile_files(source, destination, &home, &mut manifest)?;
+    }
+    if manifest.is_empty() {
+        return Err("The selected profile does not contain any files that can be activated.".to_string());
+    }
+
+    let store = load_file_profile_store();
     let stamp = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| format!("Could not create backup timestamp: {error}"))?
@@ -1225,17 +1500,42 @@ fn apply_file_profile(profile: &FileProfile) -> Result<String, String> {
         .join(".config")
         .join("hyprgui")
         .join("backups")
-        .join(format!("{}-{stamp}", profile.name.replace('/', "-")));
+        .join(format!("{}-{stamp}", sanitized_profile_name(&profile.name)));
 
-    for (index, (_, destination)) in copy_plan.iter().enumerate() {
-        if destination.is_dir() {
-            let backup_path = backup.join(index.to_string());
-            copy_profile_tree(destination, &backup_path)?;
+    let mut backup_entries = store.active_entries.clone();
+    backup_entries.extend(manifest.iter().cloned());
+    backup_entries.sort();
+    backup_entries.dedup();
+    for relative in &backup_entries {
+        let current = safe_home_path(&home, relative)?;
+        if fs::symlink_metadata(&current).is_ok() {
+            copy_profile_tree(&current, &backup.join(relative))?;
         }
     }
+
+    for relative in &store.active_entries {
+        let current = safe_home_path(&home, relative)?;
+        if let Ok(metadata) = fs::symlink_metadata(&current) {
+            if metadata.file_type().is_symlink() || metadata.is_file() {
+                fs::remove_file(&current)
+                    .map_err(|error| format!("Could not remove previous managed file {}: {error}", current.display()))?;
+            } else {
+                return Err(format!(
+                    "Previous managed path is a directory; refusing to remove {}.",
+                    current.display()
+                ));
+            }
+        }
+    }
+
     for (source, destination) in &copy_plan {
         copy_profile_tree(source, destination)?;
     }
+
+    let mut next_store = store;
+    next_store.active_profile = Some(profile.name.clone());
+    next_store.active_entries = manifest;
+    persist_file_profile_store(&next_store)?;
 
     let reload = Command::new("hyprctl").arg("reload").output();
     let message = if reload
@@ -1262,7 +1562,13 @@ fn file_profile_name_from_url(url: &str) -> String {
         .to_string()
 }
 
-fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &FileProfile) {
+fn install_file_profile(
+    parent: &ApplicationWindow,
+    button: &Button,
+    profile: &FileProfile,
+    on_success: Option<std::boxed::Box<dyn FnOnce() + 'static>>,
+) {
+    let mut on_success = on_success;
     let repo_url = match validate_repository_url(&profile.repo_url) {
         Ok(url) => url,
         Err(error) => {
@@ -1310,13 +1616,14 @@ fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &F
     }
 
     if target_path.join(".git").exists() {
-        run_background_task(
+        run_background_task_with_completion(
             parent,
             Some(button),
             "Updating dotfiles…",
             "Dotfiles Updated",
             "The selected .file profile was updated successfully.",
             "Dotfiles Update Failed",
+            on_success.take(),
             move || {
                 verify_repo_remote(&target_path, &repo_url)?;
                 ensure_repo_clean(&target_path)?;
@@ -1372,13 +1679,14 @@ fn install_file_profile(parent: &ApplicationWindow, button: &Button, profile: &F
     }
     command.arg("--").arg(&repo_url).arg(&install_path);
 
-    run_background_task(
+    run_background_task_with_completion(
         parent,
         Some(button),
         "Cloning dotfiles…",
         "Dotfiles Installed",
         "The selected .file profile was installed successfully.",
         "Dotfiles Install Failed",
+        on_success,
         move || {
             verify_repository_access(&repo_url)?;
             command_result(command)
@@ -2440,6 +2748,8 @@ impl ConfigGUI {
         let parent = self.window.clone();
         let store_for_apply = self.file_profiles.clone();
         let selected_for_apply = selected_name.clone();
+        let refresh_for_apply = refresh_ui.clone();
+        let success_parent_for_apply = parent.clone();
         apply_profile_button.connect_clicked(move |button| {
             let Some(selected) = selected_for_apply.borrow().clone() else {
                 show_message_dialog(
@@ -2459,13 +2769,22 @@ impl ConfigGUI {
             else {
                 return;
             };
-            run_background_task(
+            run_background_task_with_completion(
                 &parent,
                 Some(button),
                 "Applying profile…",
                 "Profile Applied",
                 "The selected profile is now active.",
                 "Profile Apply Failed",
+                Some(Box::new(move || {
+                    refresh_for_apply();
+                    show_install_result(
+                        &success_parent_for_apply,
+                        "Profile Applied",
+                        true,
+                        "The selected profile is now active.",
+                    );
+                })),
                 move || apply_file_profile(&profile).map(|_| ()),
             );
         });
@@ -2473,6 +2792,8 @@ impl ConfigGUI {
         let parent = self.window.clone();
         let store_for_run = self.file_profiles.clone();
         let selected_for_run = selected_name.clone();
+        let refresh_for_run = refresh_ui.clone();
+        let success_parent_for_run = parent.clone();
         run_command_button.connect_clicked(move |button| {
             let selected = selected_for_run.borrow().clone();
             let store = store_for_run.borrow();
@@ -2483,7 +2804,22 @@ impl ConfigGUI {
                     .find(|item| item.name == name)
                     .cloned()
             }) {
-                install_file_profile(&parent, button, &profile);
+                let refresh_after_install = refresh_for_run.clone();
+                let success_parent = success_parent_for_run.clone();
+                install_file_profile(
+                    &parent,
+                    button,
+                    &profile,
+                    Some(Box::new(move || {
+                        refresh_after_install();
+                        show_install_result(
+                            &success_parent,
+                            "Dotfiles Ready",
+                            true,
+                            "The selected dotfiles profile is installed or updated.",
+                        );
+                    })),
+                );
             }
         });
 
@@ -2554,7 +2890,22 @@ impl ConfigGUI {
             }
             *selected_for_quick.borrow_mut() = Some(profile.name.clone());
             refresh_for_quick();
-            install_file_profile(&parent, button, &profile);
+            let refresh_after_install = refresh_for_quick.clone();
+            let success_parent = parent.clone();
+            install_file_profile(
+                &parent,
+                button,
+                &profile,
+                Some(Box::new(move || {
+                    refresh_after_install();
+                    show_install_result(
+                        &success_parent,
+                        "Dotfiles Ready",
+                        true,
+                        "The selected dotfiles profile is installed or updated.",
+                    );
+                })),
+            );
         });
 
         let refresh_for_button = refresh_ui.clone();
@@ -5385,7 +5736,22 @@ impl ConfigWidget {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_git_remote_identity, validate_repository_url, validate_version_ref};
+    use super::{
+        normalize_git_remote_identity, profile_copy_plan, safe_home_path, validate_repository_url,
+        validate_version_ref,
+    };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "better-hyprland-gui-dotfiles-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create test root");
+        root
+    }
 
     #[test]
     fn normalizes_common_github_remote_forms() {
@@ -5428,5 +5794,53 @@ mod tests {
         )
         .is_err());
         assert!(validate_repository_url("https://github.com/example").is_err());
+    }
+
+    #[test]
+    fn builds_plan_for_home_and_hypr_layouts() {
+        let root = test_root("home-layout");
+        let profile = root.join("profile");
+        let home = root.join("home");
+        fs::create_dir_all(profile.join("dots/.config/hypr")).expect("create profile layout");
+        fs::write(profile.join("dots/.config/hypr/hyprland.conf"), "general {}")
+            .expect("write hyprland config");
+
+        let plan = profile_copy_plan(&profile, &home).expect("build copy plan");
+        assert!(plan.iter().any(|(source, destination)| {
+            source.ends_with(Path::new("dots/.config"))
+                && destination.ends_with(Path::new(".config"))
+        }));
+        assert!(plan.iter().any(|(source, destination)| {
+            source.ends_with(Path::new("dots/.config/hypr"))
+                && destination.ends_with(Path::new(".config/hypr"))
+        }));
+    }
+
+    #[test]
+    fn builds_plan_for_stow_style_packages() {
+        let root = test_root("stow-layout");
+        let profile = root.join("profile");
+        let home = root.join("home");
+        fs::create_dir_all(profile.join("hyprland/.config/hypr")).expect("create stow layout");
+        fs::write(profile.join("hyprland/.config/hypr/hyprland.conf"), "general {}")
+            .expect("write hyprland config");
+
+        let plan = profile_copy_plan(&profile, &home).expect("build stow copy plan");
+        assert!(plan.iter().any(|(source, destination)| {
+            source.ends_with(Path::new("hyprland/.config"))
+                && destination.ends_with(Path::new(".config"))
+        }));
+    }
+
+    #[test]
+    fn rejects_unsupported_profiles_and_unsafe_managed_paths() {
+        let root = test_root("invalid-layout");
+        let profile = root.join("profile");
+        let home = root.join("home");
+        fs::create_dir_all(&profile).expect("create empty profile");
+
+        assert!(profile_copy_plan(&profile, &home).is_err());
+        assert!(safe_home_path(&home, "../outside").is_err());
+        assert!(safe_home_path(&home, "/tmp/outside").is_err());
     }
 }
