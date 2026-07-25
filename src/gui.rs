@@ -1575,36 +1575,164 @@ fn copy_profile_tree(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_profile_files(
-    source: &Path,
-    destination: &Path,
-    home: &Path,
-    entries: &mut Vec<String>,
-) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(source)
-        .map_err(|error| format!("Could not inspect {}: {error}", source.display()))?;
-    if metadata.file_type().is_symlink() {
+fn resolve_profile_source(profile_root: &Path, source: &Path) -> Result<PathBuf, String> {
+    let resolved = fs::canonicalize(source)
+        .map_err(|error| format!("Could not resolve profile path {}: {error}", source.display()))?;
+    if !resolved.starts_with(profile_root) {
         return Err(format!(
-            "Refusing to activate symlinked profile path {}.",
+            "Refusing to activate symlinked profile path {} because it points outside the installed profile.",
             source.display()
         ));
     }
+    Ok(resolved)
+}
 
+fn copy_profile_tree_from_profile(
+    source: &Path,
+    destination: &Path,
+    profile_root: &Path,
+) -> Result<(), String> {
+    let mut active_directories = Vec::new();
+    copy_profile_tree_from_profile_inner(
+        source,
+        destination,
+        profile_root,
+        &mut active_directories,
+    )
+}
+
+fn copy_profile_tree_from_profile_inner(
+    source: &Path,
+    destination: &Path,
+    profile_root: &Path,
+    active_directories: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let resolved_source = resolve_profile_source(profile_root, source)?;
+    let metadata = fs::metadata(&resolved_source)
+        .map_err(|error| format!("Could not inspect {}: {error}", source.display()))?;
+
+    ensure_destination_parents_are_not_symlinks(destination)?;
     if metadata.is_dir() {
-        for entry in fs::read_dir(source)
+        if active_directories.iter().any(|path| path == &resolved_source) {
+            return Err(format!(
+                "Refusing to activate cyclic profile directory {}.",
+                source.display()
+            ));
+        }
+        active_directories.push(resolved_source.clone());
+
+        if let Ok(destination_metadata) = fs::symlink_metadata(destination) {
+            if destination_metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Refusing to copy into symlinked destination {}. Remove it or choose another profile path first.",
+                    destination.display()
+                ));
+            }
+            if !destination_metadata.is_dir() {
+                fs::remove_file(destination).map_err(|error| {
+                    format!("Could not replace {} with a directory: {error}", destination.display())
+                })?;
+            }
+        }
+        fs::create_dir_all(destination)
+            .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
+        for entry in fs::read_dir(&resolved_source)
             .map_err(|error| format!("Could not read {}: {error}", source.display()))?
         {
             let entry =
                 entry.map_err(|error| format!("Could not inspect profile file: {error}"))?;
             if entry.file_name() != ".git" {
-                collect_profile_files(
+                copy_profile_tree_from_profile_inner(
                     &entry.path(),
                     &destination.join(entry.file_name()),
-                    home,
-                    entries,
+                    profile_root,
+                    active_directories,
                 )?;
             }
         }
+        active_directories.pop();
+        return Ok(());
+    }
+
+    if let Ok(destination_metadata) = fs::symlink_metadata(destination) {
+        if destination_metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing to replace symlinked destination {}. Remove it or choose another profile path first.",
+                destination.display()
+            ));
+        }
+        if destination_metadata.is_dir() {
+            fs::remove_dir_all(destination)
+                .map_err(|error| format!("Could not replace {}: {error}", destination.display()))?;
+        } else {
+            fs::remove_file(destination)
+                .map_err(|error| format!("Could not replace {}: {error}", destination.display()))?;
+        }
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    }
+    fs::copy(&resolved_source, destination)
+        .map_err(|error| format!("Could not copy {}: {error}", source.display()))?;
+    Ok(())
+}
+
+fn collect_profile_files(
+    source: &Path,
+    destination: &Path,
+    home: &Path,
+    profile_root: &Path,
+    entries: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut active_directories = Vec::new();
+    collect_profile_files_inner(
+        source,
+        destination,
+        home,
+        profile_root,
+        entries,
+        &mut active_directories,
+    )
+}
+
+fn collect_profile_files_inner(
+    source: &Path,
+    destination: &Path,
+    home: &Path,
+    profile_root: &Path,
+    entries: &mut Vec<String>,
+    active_directories: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let resolved_source = resolve_profile_source(profile_root, source)?;
+    let metadata = fs::metadata(&resolved_source)
+        .map_err(|error| format!("Could not inspect {}: {error}", source.display()))?;
+    if metadata.is_dir() {
+        if active_directories.iter().any(|path| path == &resolved_source) {
+            return Err(format!(
+                "Refusing to activate cyclic profile directory {}.",
+                source.display()
+            ));
+        }
+        active_directories.push(resolved_source.clone());
+        for entry in fs::read_dir(&resolved_source)
+            .map_err(|error| format!("Could not read {}: {error}", source.display()))?
+        {
+            let entry =
+                entry.map_err(|error| format!("Could not inspect profile file: {error}"))?;
+            if entry.file_name() != ".git" {
+                collect_profile_files_inner(
+                    &entry.path(),
+                    &destination.join(entry.file_name()),
+                    home,
+                    profile_root,
+                    entries,
+                    active_directories,
+                )?;
+            }
+        }
+        active_directories.pop();
         return Ok(());
     }
 
@@ -1660,6 +1788,8 @@ fn apply_file_profile(profile: &FileProfile) -> Result<String, String> {
     if !profile_root.join(".git").is_dir() {
         return Err("Install this profile before applying it.".to_string());
     }
+    let canonical_profile_root = fs::canonicalize(&profile_root)
+        .map_err(|error| format!("Could not resolve installed profile path: {error}"))?;
 
     let home = home_dir().ok_or_else(|| "Could not determine the home directory.".to_string())?;
     let copy_plan = profile_copy_plan(&profile_root, &home)?;
@@ -1675,7 +1805,13 @@ fn apply_file_profile(profile: &FileProfile) -> Result<String, String> {
 
     let mut manifest = Vec::new();
     for (source, destination) in &copy_plan {
-        collect_profile_files(source, destination, &home, &mut manifest)?;
+        collect_profile_files(
+            source,
+            destination,
+            &home,
+            &canonical_profile_root,
+            &mut manifest,
+        )?;
     }
     if manifest.is_empty() {
         return Err("The selected profile does not contain any files that can be activated.".to_string());
@@ -1719,7 +1855,7 @@ fn apply_file_profile(profile: &FileProfile) -> Result<String, String> {
     }
 
     for (source, destination) in &copy_plan {
-        copy_profile_tree(source, destination)?;
+        copy_profile_tree_from_profile(source, destination, &canonical_profile_root)?;
     }
 
     let mut next_store = store;
@@ -5937,8 +6073,8 @@ impl ConfigWidget {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_git_remote_identity, profile_copy_plan, safe_home_path, validate_repository_url,
-        validate_version_ref,
+        collect_profile_files, normalize_git_remote_identity, profile_copy_plan, safe_home_path,
+        validate_repository_url, validate_version_ref,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -6042,5 +6178,44 @@ mod tests {
         assert!(profile_copy_plan(&profile, &home).is_err());
         assert!(safe_home_path(&home, "../outside").is_err());
         assert!(safe_home_path(&home, "/tmp/outside").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_internal_profile_symlinks_but_rejects_external_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("symlink-safety");
+        let profile = root.join("profile");
+        let home = root.join("home");
+        let icons = profile.join("dots/.config/icons");
+        fs::create_dir_all(&icons).expect("create profile icons");
+        fs::write(icons.join("base.svg"), "<svg />").expect("write target icon");
+        symlink("base.svg", icons.join("alias.svg")).expect("create internal symlink");
+
+        let canonical_profile = fs::canonicalize(&profile).expect("resolve profile root");
+        let mut manifest = Vec::new();
+        collect_profile_files(
+            &profile.join("dots/.config/icons"),
+            &home.join(".config/icons"),
+            &home,
+            &canonical_profile,
+            &mut manifest,
+        )
+        .expect("allow internal symlink");
+        assert!(manifest.iter().any(|entry| entry == ".config/icons/alias.svg"));
+
+        let outside = root.join("outside.svg");
+        fs::write(&outside, "<svg />").expect("write outside target");
+        symlink(&outside, icons.join("outside.svg")).expect("create external symlink");
+        let error = collect_profile_files(
+            &profile.join("dots/.config/icons"),
+            &home.join(".config/icons"),
+            &home,
+            &canonical_profile,
+            &mut Vec::new(),
+        )
+        .expect_err("reject external symlink");
+        assert!(error.contains("outside the installed profile"));
     }
 }
