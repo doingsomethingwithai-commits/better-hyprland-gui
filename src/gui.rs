@@ -110,17 +110,62 @@ fn show_message_dialog(
     title: &str,
     text: &str,
 ) {
-    let dialog = MessageDialog::builder()
+    let dialog = gtk::Dialog::builder()
         .transient_for(parent)
-        .message_type(message_type)
-        .buttons(gtk::ButtonsType::Ok)
         .title(title)
-        .text(text)
         .modal(true)
+        .default_width(760)
+        .default_height(520)
         .build();
 
-    dialog.connect_response(|dialog, _| {
-        dialog.close();
+    let content = dialog.content_area();
+    content.set_spacing(10);
+    content.set_margin_top(14);
+    content.set_margin_bottom(14);
+    content.set_margin_start(14);
+    content.set_margin_end(14);
+
+    let heading = Box::new(Orientation::Horizontal, 8);
+    let icon_name = match message_type {
+        gtk::MessageType::Error => "dialog-error-symbolic",
+        gtk::MessageType::Warning => "dialog-warning-symbolic",
+        gtk::MessageType::Question => "dialog-question-symbolic",
+        _ => "dialog-information-symbolic",
+    };
+    heading.append(&icon_image(icon_name));
+    let heading_label = Label::new(Some(title));
+    heading_label.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(title)));
+    heading_label.set_halign(gtk::Align::Start);
+    heading.append(&heading_label);
+    content.append(&heading);
+
+    let scroller = ScrolledWindow::new();
+    scroller.set_vexpand(true);
+    scroller.set_hexpand(true);
+    scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+
+    let text_view = gtk::TextView::new();
+    text_view.set_editable(false);
+    text_view.set_cursor_visible(false);
+    text_view.set_monospace(true);
+    text_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    text_view.set_vexpand(true);
+    text_view.set_hexpand(true);
+    text_view.buffer().set_text(text);
+    scroller.set_child(Some(&text_view));
+    content.append(&scroller);
+
+    dialog.add_button("Copy", gtk::ResponseType::Help);
+    dialog.add_button("Close", gtk::ResponseType::Close);
+
+    let clipboard = text_view.display().clipboard();
+    let copy_text = text.to_string();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Help {
+            clipboard.set_text(&copy_text);
+        } else {
+            dialog.close();
+        }
     });
 
     dialog.show();
